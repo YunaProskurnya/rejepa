@@ -6,10 +6,10 @@ logger = logging.getLogger(__name__)
 
 # Coordinate space is patches of the image.
 # A rectangle is [h, w, top, left]. scale is an area fraction of the
-# patch grid. aspect_ratio is height / width.
+# patch grid. aspect_ratio is side / side.
 
 
-def target_crop_patches_emb(
+def pick_target_patches(
     patches,
     M=4,
     aspect_ratio=(0.75, 1.5),
@@ -17,17 +17,16 @@ def target_crop_patches_emb(
     overlap=True,
     seed=0,
 ):
-    """Sample M target rectangles on the patch grid.
+    """Sample M target blocks on the patch grid.
 
-    patches: [C, H, W, D]. Only H and W are read.
+    patches: [N, C, P, P], row-major, N = grid_h * grid_w.
 
     Targets may overlap. overlap=True matches I-JEPA.
 
-    Output: [M, 4] long tensor. Each row is [h, w, top, left].
+    Output: list of M long tensors. Each tensor holds the patch indexes in that block.
     """
-    _, height, width, _ = (
-        patches.shape
-    )  # TODO: adapt to encoder, needed height, width
+    count = patches.shape[0]
+    side = int(count ** 0.5)
     device = patches.device
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
@@ -35,8 +34,8 @@ def target_crop_patches_emb(
 
     logger.info(
         "target masks: grid=%dx%d M=%d scale=%s aspect_ratio=%s overlap=%s seed=%s",
-        height,
-        width,
+        side,
+        side,
         M,
         scale,
         aspect_ratio,
@@ -58,14 +57,14 @@ def target_crop_patches_emb(
                 .item()
             )
 
-            h = min(height, max(1, round(height * scale_crop)))
-            w = min(width, max(1, round(h * aspect_crop)))
+            h = min(side, max(1, round(side * scale_crop)))
+            w = min(side, max(1, round(h * aspect_crop)))
 
             t = torch.randint(
-                0, height - h + 1, (), device=device, generator=generator
+                0, side - h + 1, (), device=device, generator=generator
             ).item()
             l = torch.randint(
-                0, width - w + 1, (), device=device, generator=generator
+                0, side - w + 1, (), device=device, generator=generator
             ).item()
 
             overlaps = False
@@ -77,64 +76,54 @@ def target_crop_patches_emb(
                         overlaps = True
                         break
 
-            logger.info(
-                "%s sample scale=%.4f aspect_ratio=%.4f -> [h=%d, w=%d, top=%d, left=%d] area=%d overlap=%s",
-                name,
-                scale_crop,
-                aspect_crop,
-                h,
-                w,
-                t,
-                l,
-                h * w,
-                overlaps,
-            )
-
             if not overlaps:
                 blocks.append([h, w, t, l])
                 logger.info("%s accepted", name)
                 break
 
-    if not blocks:
-        return torch.zeros((0, 4), dtype=torch.long, device=device)
-    return torch.tensor(blocks, dtype=torch.long, device=device)
+    target_patches_indices = []
+    for block_h, block_w, top, left in blocks:
+        rows = torch.arange(top, top + block_h, device=device)
+        cols = torch.arange(left, left + block_w, device=device)
+        grid_rows, grid_cols = torch.meshgrid(rows, cols, indexing="ij")
+        target_patches_indices.append((grid_rows * side + grid_cols).reshape(-1))
+    logger.info(f"{scale_crop=:4} {as
+    pect_crop=:4} {overlap=} {h * w=} {target_patches_indices=}")
+    return target_patches_indices
 
 
-def context_crop_patches(
+def pick_context_patches(
     patches,
-    blocks,
+    target_patches_indices,
     aspect_ratio=(1.0, 1.0),
     scale=(0.85, 1.0),
     seed=0,
 ):
-    """Sample the context crop and drop every target rectangle from it.
+    """Sample the context crop and drop every target patch from it.
 
-    patches: [C, H, W, D].
+    patches: [N, C, P, P], row-major, N = grid_h * grid_w.
 
-    blocks:
-        Target rectangles from target_crop_patches_emb.
-        Each block is [h, w, top, left], shape [M, 4].
+    target_patches_indices:
+        Patch indexes from pick_target_patches.
+        One long tensor per target.
 
     Returns:
-        context_patches: [C, N, D]
-        keep_mask:       [H, W]
-        context_crop:    [h, w, top, left]
+        context_patches_indices: long tensor of kept patch indexes, shape [K].
     """
-    _, height, width, _ = patches.shape # TODO: adapt to encoder, needed height, width
+    count = patches.shape[0]
+    side = int(count ** 0.5)
     device = patches.device
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
 
-    blocks = blocks.tolist()
-
     logger.info(
-        "context mask A: grid=%dx%d scale=%s aspect_ratio=%s seed=%s targets=%d",
-        height,
-        width,
+        "context mask: grid=%dx%d scale=%s aspect_ratio=%s seed=%s targets=%d",
+        side,
+        side,
         scale,
         aspect_ratio,
         seed,
-        len(blocks),
+        len(target_patches_indices),
     )
 
     # 1. Sample context crop
@@ -148,12 +137,12 @@ def context_crop_patches(
         .item()
     )
 
-    crop_h = min(height, max(1, round(height * scale_crop)))
-    crop_w = min(width, max(1, round(width * scale_crop * aspect_ratio_crop)))
+    crop_h = min(side, max(1, round(side * scale_crop)))
+    crop_w = min(side, max(1, round(side * scale_crop * aspect_ratio_crop)))
 
     top_pos_crop = torch.randint(
         0,
-        height - crop_h + 1,
+        side - crop_h + 1,
         (),
         device=device,
         generator=generator,
@@ -161,18 +150,11 @@ def context_crop_patches(
 
     left_pos_crop = torch.randint(
         0,
-        width - crop_w + 1,
+        side - crop_w + 1,
         (),
         device=device,
         generator=generator,
     ).item()
-
-    context_crop = [
-        crop_h,
-        crop_w,
-        top_pos_crop,
-        left_pos_crop,
-    ]
 
     logger.info(
         "A sample scale=%.4f aspect_ratio=%.4f -> [h=%d, w=%d, top=%d, left=%d] area=%d",
@@ -189,55 +171,32 @@ def context_crop_patches(
     # 2. Context crop
     # ---------------------------------------------------------
 
-    keep_mask = torch.zeros(
-        (height, width),
-        dtype=torch.bool,
-        device=device,
-    )
-
-    keep_mask[
-        top_pos_crop : top_pos_crop + crop_h,
-        left_pos_crop : left_pos_crop + crop_w,
-    ] = True
+    rows = torch.arange(top_pos_crop, top_pos_crop + crop_h, device=device)
+    cols = torch.arange(left_pos_crop, left_pos_crop + crop_w, device=device)
+    grid_rows, grid_cols = torch.meshgrid(rows, cols, indexing="ij")
+    context_patches_indices = (grid_rows * side + grid_cols).reshape(-1)
 
     # ---------------------------------------------------------
     # 3. Remove Target masks from Context mask
     # ---------------------------------------------------------
 
-    for index, (target_h, target_w, target_top, target_left) in enumerate(blocks):
-        target_bottom = min(target_top + target_h, height)
-        target_right = min(target_left + target_w, width)
-        name = f"target_{index + 1}"
-
-        if target_top < target_bottom and target_left < target_right:
-            removed = int(
-                keep_mask[target_top:target_bottom, target_left:target_right]
-                .sum()
-                .item()
-            )
-            keep_mask[target_top:target_bottom, target_left:target_right] = False
-            logger.info(
-                "A minus %s [h=%d, w=%d, top=%d, left=%d] removed %d patches",
-                name,
-                target_h,
-                target_w,
-                target_top,
-                target_left,
-                removed,
-            )
-        else:
-            logger.info("A minus %s skipped, rectangle is empty", name)
+    for index, target_indices in enumerate(target_patches_indices):
+        before = context_patches_indices.numel()
+        context_patches_indices = context_patches_indices[
+            ~torch.isin(context_patches_indices, target_indices.to(device))
+        ]
+        logger.info(
+            f"Context mask minus target_{index + 1} removed {before - context_patches_indices.numel()} patches",
+        )
 
     # 4. Extract patches belonging to context mask
 
-    context_patches = patches[:, keep_mask, :]
-
     logger.info(
-        "A kept %d/%d patches, context_patches shape=%s",
-        int(keep_mask.sum().item()),
-        height * width,
-        tuple(context_patches.shape),
+        "A kept %d/%d patches, context_patches_indices shape=%s",
+        context_patches_indices.numel(),
+        side * side,
+        tuple(context_patches_indices.shape),
     )
 
-    logger.info(f"{context_patches=} {keep_mask=} {context_crop=}")
-    return context_patches, keep_mask, context_crop
+    logger.info(f"{context_patches_indices=}")
+    return context_patches_indices

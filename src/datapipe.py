@@ -6,4 +6,7 @@ import torchvision.transforms as transforms
 
 # load data
 
-# 
+# tranforms
+
+# prepare masks
+
