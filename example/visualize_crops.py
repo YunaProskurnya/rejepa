@@ -223,9 +223,8 @@ def main():
         )
 
     grid = image.width // PATCH_SIZE
-    patches = torch.zeros(grid * grid, 3, 1, 1)
-    target_indices = pick_target_patches(patches, seed=SEED)
-    context_indices = pick_context_patches(patches, target_indices, seed=SEED + 1)
+    target_indices = pick_target_patches(grid, seed=SEED)
+    context_indices = pick_context_patches(grid, target_indices, seed=SEED + 1)
 
     blocks = [_bounds(indices, grid) for indices in target_indices]
     crop_h, crop_w, crop_top, crop_left = _sample_context_rectangle(grid, SEED + 1)

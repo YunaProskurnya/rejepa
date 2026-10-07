@@ -11,14 +11,14 @@ from pathlib import Path
 import torch
 import torchvision.transforms as T
 import torchvision.transforms.functional as F
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 from torchvision.io import ImageReadMode, read_image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.masks import pick_context_patches, pick_target_patches
-from src.transforms import GaussianBlur, make_transform, process_image
+from src.transforms import make_transform, process_image
 
 IMAGE_PATH = REPO_ROOT / "example" / "lenna.png"
 OUTPUT_PATH = REPO_ROOT / "example" / "lenna_transforms.png"
@@ -138,18 +138,10 @@ def _load_source():
     return T.ToPILImage()(tensor)
 
 
-def _apply_blur(op, image):
-    if torch.bernoulli(torch.tensor(op.prob)) == 0:
-        return image, None
-    radius = op.radius_min + torch.rand(()).item() * (op.radius_max - op.radius_min)
-    return image.filter(ImageFilter.GaussianBlur(radius=radius)), radius
-
-
 def _run(source, seed):
     torch.manual_seed(seed)
     current = source
     crop_box = None
-    blur_radius = None
     stages = {}
 
     for op in make_transform().transforms:
@@ -166,28 +158,11 @@ def _run(source, seed):
                 op.interpolation,
                 antialias=op.antialias,
             )
-        elif isinstance(op, GaussianBlur):
-            current, blur_radius = _apply_blur(op, current)
         else:
             current = op(current)
         stages[type(op).__name__] = current
 
-    return crop_box, blur_radius, stages
-
-
-def _changed(before, after):
-    return before.tobytes() != after.tobytes()
-
-
-def _choose(source):
-    for seed in range(64):
-        crop_box, blur_radius, stages = _run(source, seed)
-        flipped = _changed(stages["RandomResizedCrop"], stages["RandomHorizontalFlip"])
-        colored = _changed(stages["RandomHorizontalFlip"], stages["Compose"])
-        blurred = blur_radius is not None and _changed(stages["Compose"], stages["GaussianBlur"])
-        if flipped and colored and blurred:
-            return seed, crop_box, blur_radius, stages
-    raise SystemExit("no seed applied flip, color distortion, and blur")
+    return crop_box, stages
 
 
 def _denorm(tensor):
@@ -269,12 +244,13 @@ def _mask_view(image, blocks, crop, removed_count, patch_size):
 
 def main():
     source = _load_source()
-    seed, crop_box, blur_radius, stages = _choose(source)
+    seed = 0
+    crop_box, stages = _run(source, seed)
     top, left, height, width = crop_box
     area = height * width / (source.height * source.width)
 
     torch.manual_seed(seed)
-    returned, target_indices, context_indices = process_image(str(IMAGE_PATH), patch_num=PATCH_NUM)
+    returned, target_indices, context_indices = process_image(str(IMAGE_PATH))
     normalized = stages["Normalize"]
     if not torch.equal(returned, normalized):
         raise SystemExit("process_image output does not match the staged transform")
@@ -289,8 +265,8 @@ def main():
     if not torch.equal(rebuilt, normalized):
         raise SystemExit("patches do not rebuild the transformed image")
 
-    fresh_targets = pick_target_patches(patches, seed=MASK_SEED)
-    fresh_context = pick_context_patches(patches, fresh_targets, seed=MASK_SEED)
+    fresh_targets = pick_target_patches(grid_w, seed=MASK_SEED)
+    fresh_context = pick_context_patches(grid_w, fresh_targets, seed=MASK_SEED)
     for got, expected in zip(target_indices, fresh_targets):
         if not torch.equal(got, expected):
             raise SystemExit("process_image targets do not match pick_target_patches")
@@ -326,26 +302,18 @@ def main():
     display_patch = PANEL // grid_w
     model = _show_normalized(normalized)
     kept = int(context_indices.numel())
-    colored = stages["Compose"]
-    grayscale = colored.convert("L").convert("RGB").tobytes() == colored.tobytes()
-    color_title = "5  Color distortion, grayscale" if grayscale else "5  Color distortion"
     title_font = _font(20)
     panels = [
         _panel("1  Source RGB", source_view, title_font),
         _panel("2  Random resized crop", crop_view, title_font),
         _panel("3  Resized to 224", _show_pil(stages["RandomResizedCrop"]), title_font),
-        _panel("4  Horizontal flip", _show_pil(stages["RandomHorizontalFlip"]), title_font),
-        _panel(color_title, _show_pil(colored), title_font),
-        _panel(f"6  Gaussian blur  r={blur_radius:.2f}", _show_pil(stages["GaussianBlur"]), title_font),
-        _panel("7  Patch grid, denormalized", _grid_view(model, display_patch), title_font),
-        _panel(f"8  Masks on grid  kept {kept}", _mask_view(model, blocks, crop, len(blocks), display_patch), title_font),
+        _panel("4  Patch grid, denormalized", _grid_view(model, display_patch), title_font),
+        _panel(f"5  Masks on grid  kept {kept}", _mask_view(model, blocks, crop, len(blocks), display_patch), title_font),
     ]
 
     gap = 18
     margin = 18
-    columns = 4
-    rows = [panels[index : index + columns] for index in range(0, len(panels), columns)]
-    row_width = margin * 2 + gap * (columns - 1) + sum(panel.width for panel in rows[0])
+    columns = 3
     means = normalized.mean(dim=(1, 2))
     notes = [
         (
@@ -354,8 +322,7 @@ def main():
         ),
         (
             f"tensor {tuple(normalized.shape)}"
-            f"   {'grayscale, ' if grayscale else ''}"
-            f"normalized channel mean {means[0]:.3f} {means[1]:.3f} {means[2]:.3f}"
+            f"   normalized channel mean {means[0]:.3f} {means[1]:.3f} {means[2]:.3f}"
             f"   denorm error {denorm_error:.1e}"
         ),
         (
@@ -371,10 +338,31 @@ def main():
         )
 
     note_font = _font(16)
-    note_height = 16 + 22 * len(notes)
-    height_px = margin + sum(row[0].height for row in rows) + gap * len(rows) + note_height + margin
+    note_image = Image.new("RGB", (PANEL, PANEL), PAPER)
+    note_draw = ImageDraw.Draw(note_image)
+    wrapped = []
+    for line in notes:
+        words = line.split()
+        current = words[0]
+        for word in words[1:]:
+            trial = f"{current} {word}"
+            if note_draw.textlength(trial, font=note_font) <= PANEL - 28:
+                current = trial
+            else:
+                wrapped.append(current)
+                current = word
+        wrapped.append(current)
+        wrapped.append("")
+    y_note = 8
+    for line in wrapped:
+        note_draw.text((12, y_note), line, fill=NOTE, font=note_font)
+        y_note += 22
+    panels.append(_panel("6  Run", note_image, title_font))
+
+    rows = [panels[index : index + columns] for index in range(0, len(panels), columns)]
+    row_width = margin * 2 + gap * (columns - 1) + sum(panel.width for panel in rows[0])
+    height_px = margin + sum(row[0].height for row in rows) + gap * (len(rows) - 1) + margin
     canvas = Image.new("RGB", (row_width, height_px), PAPER)
-    draw = ImageDraw.Draw(canvas)
 
     y = margin
     for row in rows:
@@ -383,11 +371,6 @@ def main():
             canvas.paste(panel, (x, y))
             x += panel.width + gap
         y += row[0].height + gap
-
-    y += 4
-    for line in notes:
-        draw.text((margin, y), line, fill=NOTE, font=note_font)
-        y += 22
 
     canvas.save(OUTPUT_PATH)
     print(f"wrote {OUTPUT_PATH}")
