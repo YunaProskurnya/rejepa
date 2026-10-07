@@ -1,4 +1,4 @@
-"""Draw one context/target crop on example/lenna.png.
+"""Draw target and context mask steps on example/lenna.png.
 
 Run from the repo root:
 
@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.masks.utils import context_crop_patches, target_crop_patches_emb
+from src.masks import pick_context_patches, pick_target_patches
 
 IMAGE_PATH = REPO_ROOT / "example" / "lenna.png"
 OUTPUT_PATH = REPO_ROOT / "example" / "lenna_crops.png"
@@ -30,6 +30,9 @@ TARGET_COLORS = (
 )
 CONTEXT_COLOR = (36, 168, 104)
 OUTSIDE_DIM = 0.28
+PAPER = (248, 246, 242)
+INK = (32, 32, 32)
+NOTE = (48, 48, 48)
 
 
 def _font(size):
@@ -69,11 +72,141 @@ def _draw_grid(draw, image_size, patch_size, fill):
 
 def _panel(title, image, font):
     header = 42
-    canvas = Image.new("RGB", (image.width, header + image.height), (248, 246, 242))
+    canvas = Image.new("RGB", (image.width, header + image.height), PAPER)
     draw = ImageDraw.Draw(canvas)
-    draw.text((12, 10), title, fill=(32, 32, 32), font=font)
+    draw.text((12, 10), title, fill=INK, font=font)
     canvas.paste(image, (0, header))
     return canvas
+
+
+def _bounds(indices, grid):
+    rows = torch.div(indices, grid, rounding_mode="floor")
+    cols = indices % grid
+    top = int(rows.min())
+    left = int(cols.min())
+    return int(rows.max()) - top + 1, int(cols.max()) - left + 1, top, left
+
+
+def _rectangle_indices(top, left, height, width, side):
+    rows = torch.arange(top, top + height)
+    cols = torch.arange(left, left + width)
+    grid_rows, grid_cols = torch.meshgrid(rows, cols, indexing="ij")
+    return (grid_rows * side + grid_cols).reshape(-1)
+
+
+def _sample_context_rectangle(side, seed, aspect_ratio=(1.0, 1.0), scale=(0.85, 1.0)):
+    device = torch.device("cpu")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    scale_crop = torch.empty((), device=device).uniform_(*scale, generator=generator).item()
+    aspect_ratio_crop = (
+        torch.empty((), device=device).uniform_(*aspect_ratio, generator=generator).item()
+    )
+    crop_h = min(side, max(1, round(side * scale_crop)))
+    crop_w = min(side, max(1, round(side * scale_crop * aspect_ratio_crop)))
+    top = torch.randint(0, side - crop_h + 1, (), device=device, generator=generator).item()
+    left = torch.randint(0, side - crop_w + 1, (), device=device, generator=generator).item()
+    return crop_h, crop_w, top, left
+
+
+def _overlap_box(block, crop):
+    block_h, block_w, block_top, block_left = block
+    crop_h, crop_w, crop_top, crop_left = crop
+    top = max(block_top, crop_top)
+    left = max(block_left, crop_left)
+    bottom = min(block_top + block_h, crop_top + crop_h)
+    right = min(block_left + block_w, crop_left + crop_w)
+    if bottom <= top or right <= left:
+        return None
+    return bottom - top, right - left, top, left
+
+
+def _restore(view, source, cells, patch_size):
+    grid = cells.shape[0]
+    for row in range(grid):
+        for col in range(grid):
+            if not bool(cells[row, col]):
+                continue
+            box = (
+                col * patch_size,
+                row * patch_size,
+                (col + 1) * patch_size,
+                (row + 1) * patch_size,
+            )
+            view.paste(source.crop(box), box[:2])
+    return view
+
+
+def _target_view(image, blocks, newest):
+    view = image.copy()
+    for color, (block_h, block_w, top, left) in zip(TARGET_COLORS, blocks):
+        _tint(view, _patch_box(top, left, block_h, block_w, PATCH_SIZE), color, 0.45)
+
+    draw = ImageDraw.Draw(view)
+    _draw_grid(draw, image.width, PATCH_SIZE, (255, 255, 255))
+    label_font = _font(18)
+    for index, (color, (block_h, block_w, top, left)) in enumerate(zip(TARGET_COLORS, blocks)):
+        box = _patch_box(top, left, block_h, block_w, PATCH_SIZE)
+        draw.rectangle(box, outline=color, width=6 if newest is not None and index == newest else 4)
+        draw.text((box[0] + 6, box[1] + 4), f"T_{index + 1}", fill=color, font=label_font)
+    return view
+
+
+def _context_view(image, crop, blocks, removed_count, wash, mark_latest=True):
+    crop_h, crop_w, crop_top, crop_left = crop
+    dark = Image.new("RGB", image.size, (18, 18, 18))
+    view = Image.blend(image, dark, 1.0 - OUTSIDE_DIM)
+
+    cells = torch.zeros(image.height // PATCH_SIZE, image.width // PATCH_SIZE, dtype=torch.bool)
+    cells[crop_top : crop_top + crop_h, crop_left : crop_left + crop_w] = True
+    for block in blocks[:removed_count]:
+        overlap = _overlap_box(block, crop)
+        if overlap is None:
+            continue
+        hole_h, hole_w, hole_top, hole_left = overlap
+        cells[hole_top : hole_top + hole_h, hole_left : hole_left + hole_w] = False
+
+    _restore(view, image, cells, PATCH_SIZE)
+    if wash:
+        _tint(view, _patch_box(crop_top, crop_left, crop_h, crop_w, PATCH_SIZE), CONTEXT_COLOR, 0.22)
+
+    if mark_latest and removed_count:
+        active = blocks[removed_count - 1]
+        overlap = _overlap_box(active, crop)
+        if overlap is not None:
+            hole_h, hole_w, hole_top, hole_left = overlap
+            hole_box = (
+                hole_left * PATCH_SIZE,
+                hole_top * PATCH_SIZE,
+                (hole_left + hole_w) * PATCH_SIZE,
+                (hole_top + hole_h) * PATCH_SIZE,
+            )
+            view.paste(image.crop(hole_box), hole_box[:2])
+            _tint(view, _patch_box(hole_top, hole_left, hole_h, hole_w, PATCH_SIZE), TARGET_COLORS[removed_count - 1], 0.45)
+
+    draw = ImageDraw.Draw(view)
+    _draw_grid(draw, image.width, PATCH_SIZE, (255, 255, 255))
+    draw.rectangle(
+        _patch_box(crop_top, crop_left, crop_h, crop_w, PATCH_SIZE),
+        outline=CONTEXT_COLOR,
+        width=4,
+    )
+    label_font = _font(18)
+    draw.text(
+        (crop_left * PATCH_SIZE + 6, crop_top * PATCH_SIZE + 4),
+        "A",
+        fill=CONTEXT_COLOR,
+        font=label_font,
+    )
+    for index, (color, block) in enumerate(zip(TARGET_COLORS, blocks[:removed_count])):
+        overlap = _overlap_box(block, crop)
+        if overlap is None:
+            continue
+        hole_h, hole_w, hole_top, hole_left = overlap
+        box = _patch_box(hole_top, hole_left, hole_h, hole_w, PATCH_SIZE)
+        draw.rectangle(box, outline=color, width=6 if mark_latest and index == removed_count - 1 else 4)
+        draw.text((box[0] + 6, box[1] + 4), f"T_{index + 1}", fill=color, font=label_font)
+    return view
 
 
 def main():
@@ -90,111 +223,90 @@ def main():
         )
 
     grid = image.width // PATCH_SIZE
-    patches = torch.zeros(1, grid, grid, 1)
-    blocks = target_crop_patches_emb(patches, seed=SEED)
-    print(f"{blocks=}")
-    context_patches, keep_mask, context_crop = context_crop_patches(
-        patches, blocks, seed=SEED + 1
-    )
+    target_indices = pick_target_patches(grid, seed=SEED)
+    context_indices = pick_context_patches(grid, target_indices, seed=SEED + 1)
 
-    kept = int(keep_mask.sum().item())
-    if context_patches.shape != (1, kept, 1):
-        raise SystemExit(
-            f"context patches {tuple(context_patches.shape)} do not match keep_mask sum {kept}"
-        )
-
-    crop_h, crop_w, crop_top, crop_left = context_crop
-    block_rows = blocks.tolist()
+    blocks = [_bounds(indices, grid) for indices in target_indices]
+    crop_h, crop_w, crop_top, crop_left = _sample_context_rectangle(grid, SEED + 1)
+    crop = (crop_h, crop_w, crop_top, crop_left)
+    initial_indices = _rectangle_indices(crop_top, crop_left, crop_h, crop_w, grid)
+    replayed = initial_indices
+    for indices in target_indices:
+        replayed = replayed[~torch.isin(replayed, indices)]
+    if not torch.equal(replayed, context_indices):
+        raise SystemExit("context replay does not match pick_context_patches")
 
     grid_view = image.copy()
     grid_draw = ImageDraw.Draw(grid_view)
     _draw_grid(grid_draw, image.width, PATCH_SIZE, (255, 255, 255))
 
-    overlay = image.copy()
-    _tint(
-        overlay,
-        _patch_box(crop_top, crop_left, crop_h, crop_w, PATCH_SIZE),
-        CONTEXT_COLOR,
-        0.22,
-    )
-    for color, (block_h, block_w, top, left) in zip(TARGET_COLORS, block_rows):
-        _tint(overlay, _patch_box(top, left, block_h, block_w, PATCH_SIZE), color, 0.45)
-
-    overlay_draw = ImageDraw.Draw(overlay)
-    _draw_grid(overlay_draw, image.width, PATCH_SIZE, (255, 255, 255))
-    overlay_draw.rectangle(
-        _patch_box(crop_top, crop_left, crop_h, crop_w, PATCH_SIZE),
-        outline=CONTEXT_COLOR,
-        width=4,
-    )
-    label_font = _font(18)
-    for index, (color, (block_h, block_w, top, left)) in enumerate(
-        zip(TARGET_COLORS, block_rows)
-    ):
-        box = _patch_box(top, left, block_h, block_w, PATCH_SIZE)
-        overlay_draw.rectangle(box, outline=color, width=4)
-        overlay_draw.text((box[0] + 6, box[1] + 4), f"B_{index + 1}", fill=color, font=label_font)
-
-    overlay_draw.text(
-        (crop_left * PATCH_SIZE + 6, crop_top * PATCH_SIZE + 4),
-        "A",
-        fill=CONTEXT_COLOR,
-        font=label_font,
-    )
-
-    kept_view = Image.blend(image, Image.new("RGB", image.size, (18, 18, 18)), 1.0 - OUTSIDE_DIM)
+    number_view = image.copy()
+    number_draw = ImageDraw.Draw(number_view)
+    _draw_grid(number_draw, image.width, PATCH_SIZE, (255, 255, 255))
+    number_font = _font(16)
     for row in range(grid):
         for col in range(grid):
-            if not bool(keep_mask[row, col]):
-                continue
-            box = (
-                col * PATCH_SIZE,
-                row * PATCH_SIZE,
-                (col + 1) * PATCH_SIZE,
-                (row + 1) * PATCH_SIZE,
+            text = str(row * grid + col)
+            box = number_draw.textbbox((0, 0), text, font=number_font)
+            text_w = box[2] - box[0]
+            text_h = box[3] - box[1]
+            x = col * PATCH_SIZE + (PATCH_SIZE - text_w) / 2
+            y = row * PATCH_SIZE + (PATCH_SIZE - text_h) / 2 - 1
+            number_draw.text(
+                (x, y),
+                text,
+                fill=(255, 255, 255),
+                font=number_font,
+                stroke_width=2,
+                stroke_fill=(20, 20, 20),
             )
-            kept_view.paste(image.crop(box), box[:2])
-    kept_draw = ImageDraw.Draw(kept_view)
-    kept_draw.rectangle(
-        _patch_box(crop_top, crop_left, crop_h, crop_w, PATCH_SIZE),
-        outline=CONTEXT_COLOR,
-        width=4,
-    )
 
     title_font = _font(20)
-    note_font = _font(16)
+    kept = int(context_indices.numel())
     panels = [
         _panel("1  Patch grid", grid_view, title_font),
-        _panel("2  Context mask A, target masks B", overlay, title_font),
-        _panel("3  Encoder input  A minus B", kept_view, title_font),
+        _panel("2  Patch numbers", number_view, title_font),
+        _panel("3  Target masks", _target_view(image, blocks, None), title_font),
+        _panel(
+            f"4  Initial context mask {crop_h * crop_w} patches",
+            _context_view(image, crop, blocks, 0, wash=True),
+            title_font,
+        ),
+        _panel(
+            f"5  Context mask without targets kept {kept}",
+            _context_view(image, crop, blocks, len(blocks), wash=False, mark_latest=False),
+            title_font,
+        ),
     ]
 
     gap = 18
     margin = 18
-    note_height = 28 + 22 * max(1, len(block_rows))
-    width = margin * 2 + gap * (len(panels) - 1) + sum(panel.width for panel in panels)
-    height = margin + panels[0].height + note_height + margin
-    canvas = Image.new("RGB", (width, height), (248, 246, 242))
+    columns = 3
+    rows = [panels[index : index + columns] for index in range(0, len(panels), columns)]
+    row_width = margin * 2 + gap * (columns - 1) + sum(panel.width for panel in rows[0])
+    note_font = _font(16)
+    notes = [
+        f"grid {grid}x{grid}   patch {PATCH_SIZE}px   seed {SEED}   kept {kept}/{grid * grid}",
+    ]
+    for index, indices in enumerate(target_indices):
+        listed = ", ".join(str(int(value)) for value in indices.tolist())
+        notes.append(f"Target mask {index + 1}: {listed}")
+    note_height = 16 + 22 * len(notes)
+    height = margin + rows[0][0].height * 2 + gap + note_height + margin
+    canvas = Image.new("RGB", (row_width, height), PAPER)
     draw = ImageDraw.Draw(canvas)
 
-    x = margin
-    for panel in panels:
-        canvas.paste(panel, (x, margin))
-        x += panel.width + gap
+    y = margin
+    for row in rows:
+        x = margin
+        for panel in row:
+            canvas.paste(panel, (x, y))
+            x += panel.width + gap
+        y += row[0].height + gap
 
-    notes = [
-        f"grid {grid}x{grid}   patch {PATCH_SIZE}px   seed {SEED}   "
-        f"A context mask [h={crop_h}, w={crop_w}, top={crop_top}, left={crop_left}]   "
-        f"kept {kept}/{grid * grid}",
-    ]
-    for index, (block_h, block_w, top, left) in enumerate(block_rows):
-        notes.append(
-            f"B_{index + 1} target mask  [h={block_h}, w={block_w}, top={top}, left={left}]  "
-            f"area {block_h * block_w}"
-        )
-    y = margin + panels[0].height + 10
+    y += 4
     for line in notes:
-        draw.text((margin, y), line, fill=(48, 48, 48), font=note_font)
+        draw.text((margin, y), line, fill=NOTE, font=note_font)
         y += 22
 
     canvas.save(OUTPUT_PATH)
