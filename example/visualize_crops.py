@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.masks.utils import context_crop_patches, target_crop_patches_emb
+from src.masks import context_crop_patches, target_crop_patches_emb
 
 IMAGE_PATH = REPO_ROOT / "example" / "lenna.png"
 OUTPUT_PATH = REPO_ROOT / "example" / "lenna_crops.png"

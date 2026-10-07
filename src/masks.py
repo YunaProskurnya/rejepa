@@ -25,7 +25,9 @@ def target_crop_patches_emb(
 
     Output: [M, 4] long tensor. Each row is [h, w, top, left].
     """
-    _, height, width, _ = patches.shape # something like this, needed height and width (embedding space doesn't matter)
+    _, height, width, _ = (
+        patches.shape
+    )  # TODO: adapt to encoder, needed height, width
     device = patches.device
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
@@ -45,14 +47,26 @@ def target_crop_patches_emb(
     for index in range(M):
         name = f"target_{index + 1}"
         while True:
-            scale_crop = torch.empty((), device=device).uniform_(*scale, generator=generator).item()
-            aspect_crop = torch.empty((), device=device).uniform_(*aspect_ratio, generator=generator).item()
+            scale_crop = (
+                torch.empty((), device=device)
+                .uniform_(*scale, generator=generator)
+                .item()
+            )
+            aspect_crop = (
+                torch.empty((), device=device)
+                .uniform_(*aspect_ratio, generator=generator)
+                .item()
+            )
 
             h = min(height, max(1, round(height * scale_crop)))
             w = min(width, max(1, round(h * aspect_crop)))
 
-            t = torch.randint(0, height - h + 1, (), device=device, generator=generator).item()
-            l = torch.randint(0, width - w + 1, (), device=device, generator=generator).item()
+            t = torch.randint(
+                0, height - h + 1, (), device=device, generator=generator
+            ).item()
+            l = torch.randint(
+                0, width - w + 1, (), device=device, generator=generator
+            ).item()
 
             overlaps = False
             if not overlap:
@@ -106,7 +120,7 @@ def context_crop_patches(
         keep_mask:       [H, W]
         context_crop:    [h, w, top, left]
     """
-    _, height, width, _ = patches.shape
+    _, height, width, _ = patches.shape # TODO: adapt to encoder, needed height, width
     device = patches.device
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
@@ -125,8 +139,14 @@ def context_crop_patches(
 
     # 1. Sample context crop
 
-    scale_crop = torch.empty((), device=device).uniform_(*scale, generator=generator).item()
-    aspect_ratio_crop = torch.empty((), device=device).uniform_(*aspect_ratio, generator=generator).item()
+    scale_crop = (
+        torch.empty((), device=device).uniform_(*scale, generator=generator).item()
+    )
+    aspect_ratio_crop = (
+        torch.empty((), device=device)
+        .uniform_(*aspect_ratio, generator=generator)
+        .item()
+    )
 
     crop_h = min(height, max(1, round(height * scale_crop)))
     crop_w = min(width, max(1, round(width * scale_crop * aspect_ratio_crop)))
@@ -190,7 +210,11 @@ def context_crop_patches(
         name = f"target_{index + 1}"
 
         if target_top < target_bottom and target_left < target_right:
-            removed = int(keep_mask[target_top:target_bottom, target_left:target_right].sum().item())
+            removed = int(
+                keep_mask[target_top:target_bottom, target_left:target_right]
+                .sum()
+                .item()
+            )
             keep_mask[target_top:target_bottom, target_left:target_right] = False
             logger.info(
                 "A minus %s [h=%d, w=%d, top=%d, left=%d] removed %d patches",
@@ -215,8 +239,5 @@ def context_crop_patches(
         tuple(context_patches.shape),
     )
 
-    # # TODO: context encoder by Andrey
-    # return  # S_x output
-
-    print(f"{context_patches=} {keep_mask=} {context_crop=}")
+    logger.info(f"{context_patches=} {keep_mask=} {context_crop=}")
     return context_patches, keep_mask, context_crop
