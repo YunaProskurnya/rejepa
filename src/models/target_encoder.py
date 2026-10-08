@@ -18,11 +18,19 @@ def create_target_encoder(encoder):
 @torch.no_grad()
 def prepare_targets(target_encoder, images, target_indices):
     """Полное изображение -> нормализованные цели [B,Nt,D]"""
+    multiple = isinstance(target_indices, list)
+    blocks = target_indices if multiple else [target_indices]
+    if not blocks:
+        raise ValueError("target_indices must contain at least one block")
+    for indices in blocks:
+        if indices.ndim != 2 or indices.shape[0] != images.shape[0]:
+            raise ValueError("target_indices must have shape [B,Nt]")
+        if indices.numel() == 0:
+            raise ValueError("batch and target blocks must be nonempty")
     features = target_encoder(images)
     features = F.layer_norm(features, (features.shape[-1],), eps=1e-5)
-    if target_indices.ndim != 2 or target_indices.shape[0] != images.shape[0]:
-        raise ValueError("target_indices must have shape [B,Nt]")
-    return select_tokens(features, target_indices)
+    targets = [select_tokens(features, indices) for indices in blocks]
+    return targets if multiple else targets[0]
 
 
 @torch.no_grad()

@@ -47,6 +47,11 @@ class VisionTransformerPredictor(nn.Module):
 
     def forward(self, context, context_indices, target_indices):
         """[B,Nc,D], [B,Nc], [B,Nt] -> предсказания [B,Nt,D]."""
+        if isinstance(target_indices, list):
+            if not target_indices:
+                raise ValueError("target_indices must contain at least one block")
+            return [self.forward(context, context_indices, indices) for indices in target_indices]
+
         if context.ndim != 3 or context.shape[-1] != self.embed_dim:
             raise ValueError("context must have shape [B,Nc,embed_dim]")
         B, Nc, _ = context.shape
@@ -54,6 +59,8 @@ class VisionTransformerPredictor(nn.Module):
             raise ValueError("context_indices must match context shape [B,Nc]")
         if target_indices.ndim != 2 or target_indices.shape[0] != B:
             raise ValueError("target_indices must have shape [B,Nt]")
+        if B == 0 or Nc == 0 or target_indices.shape[1] == 0:
+            raise ValueError("batch, context and target blocks must be nonempty")
 
         positions = self.predictor_pos_embed.expand(B, -1, -1)
         x = self.predictor_embed(context)
