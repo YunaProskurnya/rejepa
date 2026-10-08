@@ -9,6 +9,7 @@
 
 import logging
 import os
+import random
 
 try:
     from . import masks
@@ -22,40 +23,43 @@ from PIL import ImageFilter
 from torchvision.utils import save_image
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s - %(message)s [%(filename)s:%(lineno)d]",
-    handlers=[logging.FileHandler("transforms.log", mode="w"), logging.StreamHandler()],
-)
 
 
-def make_transform(crop_size=224, crop_scale=(0.3, 1.0)):
-    transform_list = [transforms.RandomResizedCrop(crop_size, scale=crop_scale)]
-    transform_list += [transforms.ToTensor()]
-    transform_list += [
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+def make_transform(crop_size=224, crop_scale=(0.3, 1.0), seed=0):
+    torch.manual_seed(seed)
+    random.seed(seed)
+    transform_list = [
+        transforms.RandomResizedCrop(crop_size, scale=crop_scale),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ]
-
-    transform = transforms.Compose(transform_list)
-    return transform
+    return transforms.Compose(transform_list)
 
 
-def process_image(image_path, image_size=224, patch_size=16):
+def process_image(image_path, image_size=224, patch_size=16, seed=0, device=None):
     if image_size % patch_size != 0:
         raise ValueError("image_size must be divisible by patch_size")
 
     image = tv_io.read_image(image_path, mode=tv_io.ImageReadMode.RGB)
     image = transforms.ToPILImage()(image)
-    image = make_transform(crop_size=image_size)(image)
+    image = make_transform(crop_size=image_size, seed=seed)(image)
+    image = image.to(torch.device("cpu") if device is None else device)
 
     grid = image_size // patch_size
-    target_patches_indices = masks.pick_target_patches(grid)
-    context_patches_indices = masks.pick_context_patches(grid, target_patches_indices)
+    target_patches_indices = masks.pick_target_patches(grid, seed=seed, device=device)
+    context_patches_indices = masks.pick_context_patches(
+        grid, target_patches_indices, seed=seed, device=device
+    )
 
     return image, target_patches_indices, context_patches_indices
 
 
 if "__main__" == __name__:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s - %(message)s [%(filename)s:%(lineno)d]",
+        handlers=[logging.FileHandler("transforms.log", mode="w"), logging.StreamHandler()],
+    )
     image, target_patches_indices, context_patches_indices = process_image(
         "example/lenna.png"
     )
