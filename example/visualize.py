@@ -220,27 +220,9 @@ def _show_denormalized(tensor):
     return image.resize((PANEL, PANEL), Image.Resampling.NEAREST)
 
 
-def _normalize_view(tensor):
+def _show_normalized(tensor):
     shown = (tensor * 0.25 + 0.5).clamp(0, 1)
-    image = T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
-    draw = ImageDraw.Draw(image)
-    font = _font(18)
-    lines = (
-        "(x - mean) / std",
-        f"mean  {MEAN[0]:.3f}  {MEAN[1]:.3f}  {MEAN[2]:.3f}",
-        f"std   {STD[0]:.3f}  {STD[1]:.3f}  {STD[2]:.3f}",
-        "shown as x / 4 + 0.5",
-    )
-    line_h = 22
-    pad = 10
-    width = max(draw.textlength(line, font=font) for line in lines)
-    box = (12, 12, int(12 + pad * 2 + width), 12 + pad * 2 + line_h * len(lines))
-    draw.rectangle(box, fill=PAPER)
-    y = 12 + pad
-    for line in lines:
-        draw.text((12 + pad, y), line, fill=INK, font=font)
-        y += line_h
-    return image
+    return T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
 
 
 def _number_view(image, patch_size, grid):
@@ -264,13 +246,6 @@ def _number_view(image, patch_size, grid):
                 stroke_width=2,
                 stroke_fill=(20, 20, 20),
             )
-    return view
-
-
-def _grid_view(image, patch_size):
-    view = image.copy()
-    draw = ImageDraw.Draw(view)
-    _draw_grid(draw, view.width, patch_size, (255, 255, 255))
     return view
 
 
@@ -432,22 +407,27 @@ def main():
 
     display_patch = PANEL // grid
     model = _show_denormalized(normalized)
+    normalized_view = _show_normalized(normalized)
     kept = int(context_indices.numel())
     title_font = _font(20)
     panels = [
         _panel("1  Source RGB", source_view, title_font),
         _panel("2  Random resized crop", crop_view, title_font),
         _panel("3  Resized to 224", _show_pil(stages["RandomResizedCrop"]), title_font),
-        _panel("4  Normalize", _normalize_view(normalized), title_font),
+        _panel("4  Normalize", normalized_view, title_font),
         _panel("5  Patch numbers", _number_view(model, display_patch, grid), title_font),
-        _panel("6  Patch grid, denormalized", _grid_view(model, display_patch), title_font),
         _panel(
-            f"7  Masks on grid  kept {kept}",
+            "6  Initial context mask",
+            _mask_view(normalized_view, [], crop, display_patch),
+            title_font,
+        ),
+        _panel(
+            f"7  Masks on grid kept {kept}",
             _mask_view(model, blocks, crop, display_patch, excluded_blocks),
             title_font,
         ),
         _panel(
-            f"8  Context without targets  kept {kept}",
+            f"8  Context without targets kept {kept}",
             _context_holes_view(model, crop, excluded_blocks, display_patch),
             title_font,
         ),
