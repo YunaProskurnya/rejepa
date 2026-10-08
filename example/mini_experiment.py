@@ -36,7 +36,7 @@ def main():
     if device.type == "cpu":
         torch.set_num_threads(min(4, torch.get_num_threads()))
 
-    image, target_indices, context_indices = process_image(str(args.image))
+    image, target_indices, context_indices = process_image(str(args.image), seed=args.seed)
     images = image.unsqueeze(0).to(device)
     context_indices = context_indices.unsqueeze(0).to(device)
     target_indices = [indices.unsqueeze(0).to(device) for indices in target_indices]
