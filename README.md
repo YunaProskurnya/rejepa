@@ -12,6 +12,24 @@ unzip imagenet100.zip
 
 [Описание и использование модулей](src/regularizers/README.md).
 
+## Линейная оценка
+
+`evaluate_linear_probe` использует target encoder без обновления весов, усредняет его патч-токены и обучает один `nn.Linear`. Возвращает точность top-1 на валидации.
+
+Когда общий загрузчик будет готов, передать два загрузчика батчей `(images, labels)` с одинаковой нумерацией классов. Для оценки нужны полные изображения без масок:
+
+```python
+from src.eval_linear import evaluate_linear_probe
+
+train_loader = make_labeled_loader(split="train", deterministic=True)
+val_loader = make_labeled_loader(split="val", deterministic=True)
+
+top1 = evaluate_linear_probe(
+    target_encoder, train_loader, val_loader,
+    num_classes=100, device=device,
+)
+```
+
 ## Обратить внимание
 
 1. **Размеры масок в `src/masks.py`.** Сейчас `scale` применяется к длине стороны, хотя должен задавать долю площади. В строках 58–59 для целевого блока написано:
