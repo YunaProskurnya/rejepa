@@ -6,6 +6,7 @@
 ```sh
 kaggle datasets download ambityga/imagenet100
 unzip imagenet100.zip
+rm imagenet100.zip
 
 mkdir train
 mv train.X*/* train/
@@ -15,8 +16,3 @@ mkdir val
 mv val.X*/* val/
 rmdir val.X*
 ```
-
-
-
-
-
