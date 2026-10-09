@@ -1,22 +1,47 @@
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import torch
 
 from src.models.encoder import VisionTransformer
+from scripts import train
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestDatasetTraining(unittest.TestCase):
+    def test_comet_logs_parameters_metrics_and_weights(self):
+        comet = MagicMock()
+        pytorch = MagicMock()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            with patch.dict(os.environ, {"COMET_API_KEY": "test-key"}), patch.dict(
+                sys.modules, {"comet_ml": comet, "comet_ml.integration.pytorch": pytorch},
+            ), patch.object(sys, "argv", ["train.py", "--smoke-test", "--max-steps", "1",
+                                          "--output", str(output), "--comet"]):
+                train.main()
+
+            comet.start.assert_called_once_with(api_key="test-key", project_name="rejepa", workspace="superustam")
+            experiment = comet.start.return_value
+            experiment.log_parameters.assert_called_once()
+            self.assertNotIn("test-key", (output / "config.json").read_text())
+            metrics = experiment.log_metrics.call_args
+            self.assertEqual(metrics.kwargs, {"step": 1, "epoch": 1})
+            self.assertTrue(math.isfinite(metrics.args[0]["loss"]))
+            pytorch.log_model.assert_called_once()
+            self.assertEqual(set(pytorch.log_model.call_args.args[1]), {"encoder", "predictor", "target_encoder"})
+            experiment.end.assert_called_once()
+
     def test_smoke_run_crosses_epoch_and_saves_usable_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "run"

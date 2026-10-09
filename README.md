@@ -19,6 +19,25 @@ python scripts/train.py --config configs/smoke.json
 ничего не скачивает и сохраняет конфигурацию, метрики и checkpoint.
 Каждому новому запуску нужна отдельная папка `--output`.
 
+## Comet
+
+Для логирования в `superustam/rejepa` загрузите локальный API key и добавьте `--comet`:
+
+```sh
+source .venv/bin/activate
+set -a
+source .env
+set +a
+python scripts/train.py --config configs/imagenet100_vit_base.json --comet
+```
+
+`.env` исключён из Git. На другом компьютере задайте `COMET_API_KEY` в окружении.
+С `--comet` в Comet отправляются параметры запуска, метрики каждого шага и финальные
+веса encoder, predictor и target encoder через
+[`log_model`](https://www.comet.com/docs/v2/integrations/ml-frameworks/pytorch/).
+Без этого флага результаты сохраняются только локально. Каждый запуск, включая
+`--resume`, создаёт отдельный Comet experiment.
+
 ## ImageNet100
 
 Команды находятся в `scripts/setup_imagenet100.sh`; вместо блока выше
