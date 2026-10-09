@@ -8,14 +8,11 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.losses import prediction_loss
+from src.optimizer import create_optimizer
+from src.train import train_step
 from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
-from src.models.target_encoder import (
-    create_target_encoder,
-    prepare_targets,
-    update_target_encoder,
-)
+from src.models.target_encoder import create_target_encoder
 
 
 def main():
@@ -51,17 +48,7 @@ def main():
     ).to(device)
     target_encoder = create_target_encoder(encoder)
 
-    decay, no_decay = [], []
-    for module in (encoder, predictor):
-        for name, parameter in module.named_parameters():
-            if parameter.requires_grad:
-                group = no_decay if "bias" in name or parameter.ndim == 1 else decay
-                group.append(parameter)
-    optimizer = torch.optim.AdamW(
-        [{"params": decay, "weight_decay": 0.04},
-         {"params": no_decay, "weight_decay": 0.0}],
-        lr=1e-3,
-    )
+    optimizer = create_optimizer(encoder, predictor, lr=1e-3, weight_decay=0.04)
 
     print(f"device={device} images={tuple(images.shape)}")
     print(f"context={tuple(context_indices.shape)} "
@@ -69,23 +56,12 @@ def main():
     print("Fixed image and masks; tiny model; diagnostic run only.")
 
     for step in range(1, args.steps + 1):
-        optimizer.zero_grad(set_to_none=True)
-
-        targets = prepare_targets(target_encoder, images, target_indices)
-        context = encoder(images, context_indices)
-        predictions = predictor(context, context_indices, target_indices)
-        loss = prediction_loss(predictions, targets)
-        if not torch.isfinite(loss).item():
-            raise RuntimeError(f"Non-finite loss at step {step}")
-
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            decay + no_decay, max_norm=float("inf"), error_if_nonfinite=True,
+        metrics = train_step(
+            encoder, predictor, target_encoder, optimizer,
+            images, context_indices, target_indices, momentum=0.996,
         )
-        optimizer.step()
-        update_target_encoder(encoder, target_encoder, momentum=0.996)
 
-        print(f"step={step:03d} loss={loss.item():.6f} grad_norm={grad_norm.item():.6f}")
+        print(f"step={step:03d} loss={metrics['loss']:.6f} grad_norm={metrics['grad_norm']:.6f}")
 
 
 if __name__ == "__main__":

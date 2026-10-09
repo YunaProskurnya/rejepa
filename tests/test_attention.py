@@ -1,5 +1,6 @@
 """Сравнение выхода и градиентов с независимой реализацией PyTorch."""
 
+import copy
 import unittest
 
 import torch
@@ -41,6 +42,37 @@ class TestAttention(unittest.TestCase):
             (model.proj.bias, reference.out_proj.bias),
         ]:
             torch.testing.assert_close(ours.grad, theirs.grad)
+
+    def test_sdpa_matches_explicit_attention_outputs_and_gradients(self):
+        torch.manual_seed(17)
+        explicit = Attention(embed_dim=12, num_heads=3).double()
+        sdpa = copy.deepcopy(explicit)
+        x = torch.randn(2, 5, 12, dtype=torch.float64, requires_grad=True)
+        sdpa_x = x.detach().clone().requires_grad_(True)
+
+        expected, _ = explicit(x)
+        actual, weights = sdpa(sdpa_x, need_weights=False)
+        self.assertIsNone(weights)
+        torch.testing.assert_close(actual, expected)
+
+        upstream = torch.randn_like(expected)
+        (expected * upstream).sum().backward()
+        (actual * upstream).sum().backward()
+        torch.testing.assert_close(sdpa_x.grad, x.grad)
+        for actual_parameter, expected_parameter in zip(sdpa.parameters(), explicit.parameters()):
+            torch.testing.assert_close(actual_parameter.grad, expected_parameter.grad)
+
+    def test_sdpa_dropout_is_disabled_in_eval(self):
+        model = Attention(embed_dim=12, num_heads=3, attn_drop=1.0).double()
+        x = torch.randn(2, 5, 12, dtype=torch.float64)
+        training_out, _ = model(x, need_weights=False)
+        torch.testing.assert_close(training_out, model.proj.bias.expand_as(training_out))
+
+        model.eval()
+        expected, _ = model(x)
+        actual, _ = model(x, need_weights=False)
+        torch.testing.assert_close(actual, expected)
+        self.assertFalse(torch.equal(actual, training_out))
 
 
 if __name__ == "__main__":

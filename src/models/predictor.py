@@ -35,6 +35,15 @@ class VisionTransformerPredictor(nn.Module):
 
         nn.init.trunc_normal_(self.mask_token, mean=0.0, std=0.02, a=-2.0, b=2.0)
         self.apply(self._init_weights)
+        self._rescale_residual_weights()
+
+    @torch.no_grad()
+    def _rescale_residual_weights(self):
+        # Та же глубинная поправка, что в авторском predictor и context encoder.
+        for layer_id, block in enumerate(self.predictor_blocks, start=1):
+            scale = math.sqrt(2.0 * layer_id)
+            block.attn.proj.weight.div_(scale)
+            block.mlp.fc2.weight.div_(scale)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

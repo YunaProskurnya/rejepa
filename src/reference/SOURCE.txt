@@ -1,0 +1,10 @@
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+Unmodified files from https://github.com/facebookresearch/ijepa
+Commit: 52c1ae95d05f743e000e8f10a1f3a79b10cff048
+
+schedulers.py: src/utils/schedulers.py
+LICENSE: LICENSE (CC BY-NC 4.0)
+
+The LICENSE in this directory applies to these upstream files.
+This directory is a small reference-code subtree, not our model implementation.
