@@ -1,4 +1,6 @@
 import csv
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import math
 import os
@@ -20,6 +22,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestDatasetTraining(unittest.TestCase):
+    def test_comet_key_is_required(self):
+        stderr = StringIO()
+        with patch.dict(os.environ, {"COMET_API_KEY": ""}), patch.object(
+            sys, "argv", ["train.py", "--smoke-test"],
+        ), redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            train.main()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("COMET_API_KEY is required", stderr.getvalue())
+
+    def test_comet_flags_are_removed(self):
+        for flag in ("--comet", "--no-comet"):
+            with self.subTest(flag=flag), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as caught:
+                train.parse_args(["--smoke-test", flag])
+            self.assertEqual(caught.exception.code, 2)
+
     def test_comet_logs_parameters_metrics_and_weights(self):
         comet = MagicMock()
         pytorch = MagicMock()
@@ -28,7 +45,7 @@ class TestDatasetTraining(unittest.TestCase):
             with patch.dict(os.environ, {"COMET_API_KEY": "test-key"}), patch.dict(
                 sys.modules, {"comet_ml": comet, "comet_ml.integration.pytorch": pytorch},
             ), patch.object(sys, "argv", ["train.py", "--smoke-test", "--max-steps", "1",
-                                          "--output", str(output), "--comet"]):
+                                          "--output", str(output)]):
                 train.main()
 
             comet.start.assert_called_once_with(api_key="test-key", project_name="rejepa", workspace="superustam")
@@ -46,7 +63,7 @@ class TestDatasetTraining(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "run"
             result = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/train.py"), "--config", str(ROOT / "configs/smoke.json"),
+                [sys.executable, str(ROOT / "tests/run_training.py"), "--config", str(ROOT / "configs/smoke.json"),
                  "--epochs", "2", "--warmup-epochs", "1", "--max-steps", "5",
                  "--output", str(output)],
                 cwd=ROOT, capture_output=True, text=True, timeout=90,
@@ -67,6 +84,11 @@ class TestDatasetTraining(unittest.TestCase):
             self.assertGreater(float(rows[-1]["momentum"]), float(rows[0]["momentum"]))
 
             checkpoint = torch.load(output / "checkpoint.pt", map_location="cpu", weights_only=True)
+            epoch_checkpoint = torch.load(output / "checkpoint-epoch-1.pt", map_location="cpu", weights_only=True)
+            self.assertEqual(epoch_checkpoint["step"], 4)
+            self.assertEqual(epoch_checkpoint["next_epoch"], 1)
+            self.assertEqual(epoch_checkpoint["next_batch"], 0)
+            self.assertFalse((output / "checkpoint-epoch-2.pt").exists())
             self.assertEqual(checkpoint["config"], config)
             self.assertEqual(config["encoder"]["mlp_ratio"], 4.0)
             self.assertEqual(config["optimizer"]["defaults"]["betas"], [0.9, 0.999])
@@ -95,7 +117,7 @@ class TestDatasetTraining(unittest.TestCase):
                 with self.subTest(collator=collator):
                     output = root / collator
                     result = subprocess.run(
-                        [sys.executable, str(ROOT / "scripts/train.py"),
+                        [sys.executable, str(ROOT / "tests/run_training.py"),
                          "--data", str(images.parent), "--collator", collator, "--num-workers", "1", "--max-steps", "1",
                          "--output", str(output)],
                         cwd=ROOT, capture_output=True, text=True, timeout=90,

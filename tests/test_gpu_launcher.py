@@ -12,7 +12,7 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "scripts/train.py"
+LAUNCHER = ROOT / "tests/run_training.py"
 
 
 class TestGPULauncher(unittest.TestCase):
@@ -26,6 +26,26 @@ class TestGPULauncher(unittest.TestCase):
         else:
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
+
+    def test_epoch_checkpoints_are_retained_and_restartable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            arguments = ["--smoke-test", "--epochs", "2", "--accumulation-steps", "3",
+                         "--checkpoint-every", "100", "--output", output]
+            self.launch(*arguments, "--max-steps", "2")
+            first = output / "checkpoint-epoch-1.pt"
+            first_bytes = first.read_bytes()
+            self.assertEqual(first_bytes, (output / "checkpoint.pt").read_bytes())
+            self.assertFalse((output / "checkpoint-epoch-2.pt").exists())
+
+            self.launch(*arguments, "--resume", first)
+            self.assertEqual(first.read_bytes(), first_bytes)
+            second = output / "checkpoint-epoch-2.pt"
+            self.assertEqual(second.read_bytes(), (output / "checkpoint.pt").read_bytes())
+            checkpoint = torch.load(second, map_location="cpu", weights_only=True)
+            self.assertEqual(checkpoint["step"], 4)
+            self.assertEqual(checkpoint["next_epoch"], 2)
+            self.assertEqual(checkpoint["next_batch"], 0)
 
     def test_accumulation_resume_matches_uninterrupted_cpu_run(self):
         for collator in ("reference", "custom"):

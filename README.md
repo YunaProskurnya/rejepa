@@ -12,6 +12,9 @@
 
 ```sh
 python -m pip install -r requirements.txt
+set -a
+source .env
+set +a
 python scripts/train.py --config configs/smoke.json
 ```
 
@@ -21,22 +24,22 @@ python scripts/train.py --config configs/smoke.json
 
 ## Comet
 
-Для логирования в `superustam/rejepa` загрузите локальный API key и добавьте `--comet`:
+Comet включён для каждого запуска в `superustam/rejepa`. Загрузите локальный API key:
 
 ```sh
 source .venv/bin/activate
 set -a
 source .env
 set +a
-python scripts/train.py --config configs/imagenet100_vit_base.json --comet
+python scripts/train.py --config configs/imagenet100_vit_base.json
 ```
 
 `.env` исключён из Git. На другом компьютере задайте `COMET_API_KEY` в окружении.
-С `--comet` в Comet отправляются параметры запуска, метрики каждого шага и финальные
+В Comet отправляются параметры запуска, метрики каждого шага и финальные
 веса encoder, predictor и target encoder через
 [`log_model`](https://www.comet.com/docs/v2/integrations/ml-frameworks/pytorch/).
-Без этого флага результаты сохраняются только локально. Каждый запуск, включая
-`--resume`, создаёт отдельный Comet experiment.
+Без `COMET_API_KEY` обучение не запускается. Флагов включения и отключения Comet нет.
+Каждый запуск, включая smoke test и `--resume`, создаёт отдельный Comet experiment.
 
 ## ImageNet100
 
@@ -141,6 +144,7 @@ python scripts/train.py --config configs/smoke.json --collator reference --outpu
 - `config.json` — полная фактическая конфигурация запуска после объединения JSON и CLI;
 - `metrics.csv` — loss, градиенты, расписания, скорость и память GPU;
 - `checkpoint.pt` — модели, оптимизатор, расписания, генераторы случайных чисел и прогресс.
+- `checkpoint-epoch-N.pt` — отдельный checkpoint после каждой полностью завершённой эпохи.
 
 В `config.json` и `checkpoint["config"]` сохраняются одинаковые параметры:
 итоговые аргументы, модели со значениями по умолчанию, маски, preprocessing,
@@ -154,6 +158,25 @@ objective, optimizer, schedules, версии библиотек и список
 Checkpoint обновляется каждые `--checkpoint-every` шагов оптимизатора (по умолчанию
 100), в конце эпохи и при штатной остановке. Для продолжения повторите исходную
 команду с тем же `--output` и добавьте `--resume path/to/checkpoint.pt`.
+Для продолжения с конкретной эпохи используйте `--resume path/to/checkpoint-epoch-N.pt`.
+
+Отдельный флаг для сохранения каждой эпохи не нужен. Пример запуска:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json --output runs/my-run
+```
+
+Продолжение с checkpoint первой эпохи с теми же настройками и папкой вывода:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --output runs/my-run --resume runs/my-run/checkpoint-epoch-1.pt
+```
+
+`--checkpoint-every 100` задаёт дополнительные сохранения в `checkpoint.pt`
+каждые 100 шагов оптимизатора. Отдельные checkpoint эпох сохраняются автоматически
+и занимают дополнительное место на диске.
+
 Параметры данных и обучения, включая collator, общее число эпох, batch size и накопление,
 должны совпадать. Если предел шагов достигнут, увеличьте `--max-steps`
 или установите `"max_steps": null` в исходном JSON.

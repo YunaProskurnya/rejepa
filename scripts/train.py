@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import random
+import shutil
 import sys
 import time
 
@@ -37,7 +38,6 @@ def seed_worker(worker_id):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Single-device I-JEPA training")
     parser.add_argument("--config", type=Path, help="JSON experiment settings; CLI options take precedence")
-    parser.add_argument("--comet", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--data", type=Path)
     parser.add_argument("--smoke-test", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dataset", choices=("imagefolder", "cifar10"), default="imagefolder")
@@ -95,9 +95,8 @@ def parse_args(argv=None):
 def main():
     parser, args = parse_args()
 
-    experiment = None
-    if args.comet and not os.environ.get("COMET_API_KEY"):
-        parser.error("--comet requires COMET_API_KEY; source .env before running")
+    if not os.environ.get("COMET_API_KEY"):
+        parser.error("COMET_API_KEY is required; source .env before running")
 
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
@@ -276,12 +275,11 @@ def main():
             parser.error("existing output directory belongs to an incompatible run")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-    if args.comet:
-        from comet_ml import start
-        from comet_ml.integration.pytorch import log_model
+    from comet_ml import start
+    from comet_ml.integration.pytorch import log_model
 
-        experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
-        experiment.log_parameters(config)
+    experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
+    experiment.log_parameters(config)
     if args.smoke_test:
         print("Synthetic images: checks execution only, not representation quality.", flush=True)
     print(f"model={args.model} collator={args.collator} device={device} precision={args.precision} images={len(dataset)} "
@@ -402,9 +400,8 @@ def main():
                     row["target_tokens"] = int(row["target_tokens"])
                 writer.writerow(row)
                 log.flush()
-                if experiment is not None:
-                    experiment.log_metrics({key: value for key, value in row.items() if value is not None},
-                                           step=step, epoch=epoch + 1)
+                experiment.log_metrics({key: value for key, value in row.items() if value is not None},
+                                       step=step, epoch=epoch + 1)
                 print(f"step={step} epoch={epoch + 1} loss={row['loss']:.6f} "
                       f"context={row['context_tokens']:g} target={row['target_tokens']:g} "
                       f"lr={lr:.6g} ema={momentum:.6f} seconds={seconds:.3f} "
@@ -417,6 +414,10 @@ def main():
                     stop_reason = "max-steps reached"
                     break
             save_checkpoint()
+            if next_epoch == epoch + 1 and next_batch == 0:
+                temporary = args.output / "checkpoint.tmp"
+                shutil.copyfile(args.output / "checkpoint.pt", temporary)
+                temporary.replace(args.output / f"checkpoint-epoch-{next_epoch}.pt")
             del iterator
         if session_updates == 0:
             save_checkpoint()
@@ -425,10 +426,9 @@ def main():
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
-    if experiment is not None:
-        log_model(experiment, {"encoder": encoder.state_dict(), "predictor": predictor.state_dict(),
-                               "target_encoder": target_encoder.state_dict()}, model_name="rejepa")
-        experiment.end()
+    log_model(experiment, {"encoder": encoder.state_dict(), "predictor": predictor.state_dict(),
+                           "target_encoder": target_encoder.state_dict()}, model_name="rejepa")
+    experiment.end()
 
 
 if __name__ == "__main__":
