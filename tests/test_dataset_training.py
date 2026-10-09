@@ -21,7 +21,7 @@ class TestDatasetTraining(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "run"
             result = subprocess.run(
-                [sys.executable, str(ROOT / "example/train_dataset.py"), "--smoke-test",
+                [sys.executable, str(ROOT / "scripts/train.py"), "--config", str(ROOT / "configs/smoke.json"),
                  "--epochs", "2", "--warmup-epochs", "1", "--max-steps", "5",
                  "--output", str(output)],
                 cwd=ROOT, capture_output=True, text=True, timeout=90,
@@ -40,6 +40,12 @@ class TestDatasetTraining(unittest.TestCase):
             self.assertGreater(float(rows[-1]["momentum"]), float(rows[0]["momentum"]))
 
             checkpoint = torch.load(output / "checkpoint.pt", map_location="cpu", weights_only=True)
+            self.assertEqual(checkpoint["config"], config)
+            self.assertEqual(config["encoder"]["mlp_ratio"], 4.0)
+            self.assertEqual(config["optimizer"]["defaults"]["betas"], [0.9, 0.999])
+            self.assertEqual(config["preprocessing"]["random_resized_crop"]["scale"], [0.3, 1.0])
+            self.assertEqual(config["objective"]["beta"], 1.0)
+            self.assertEqual(config["schedules"]["warmup_steps"], 4)
             self.assertEqual(checkpoint["step"], 5)
             self.assertEqual(checkpoint["optimizer"]["param_groups"][1]["weight_decay"], 0.0)
             self.assertTrue(all(state["step"].item() == 5 for state in checkpoint["optimizer"]["state"].values()))
@@ -59,7 +65,7 @@ class TestDatasetTraining(unittest.TestCase):
                 shutil.copyfile(ROOT / "example/lenna.png", images / f"{index}.png")
             output = root / "run"
             result = subprocess.run(
-                [sys.executable, str(ROOT / "example/train_dataset.py"),
+                [sys.executable, str(ROOT / "scripts/train.py"),
                  "--data", str(images.parent), "--num-workers", "1", "--max-steps", "1",
                  "--output", str(output)],
                 cwd=ROOT, capture_output=True, text=True, timeout=90,

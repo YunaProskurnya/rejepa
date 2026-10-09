@@ -12,7 +12,7 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "example/train_dataset.py"
+LAUNCHER = ROOT / "scripts/train.py"
 
 
 class TestGPULauncher(unittest.TestCase):
@@ -67,12 +67,20 @@ class TestGPULauncher(unittest.TestCase):
 
     def test_resume_rejects_changed_batch_size(self):
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "run"
-            self.launch("--smoke-test", "--max-steps", "1", "--output", output)
-            result = self.launch("--smoke-test", "--batch-size", "4", "--output", output,
+            root = Path(temporary)
+            output = root / "run"
+            experiment = root / "experiment.json"
+            settings = dict(smoke_test=True, max_steps=1, output=str(output), batch_size=2)
+            experiment.write_text(json.dumps(settings), encoding="utf-8")
+            self.launch("--config", experiment)
+            settings["batch_size"] = 4
+            experiment.write_text(json.dumps(settings), encoding="utf-8")
+            result = self.launch("--config", experiment,
                                  "--resume", output / "checkpoint.pt", success=False)
             self.assertIn("resume configuration differs", result.stderr)
             self.assertIn("batch_size", result.stderr)
+            saved = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual(saved["config"]["batch_size"], 2)
 
     def test_time_budget_stops_and_saves_restartable_state(self):
         with tempfile.TemporaryDirectory() as temporary:

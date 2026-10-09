@@ -9,7 +9,7 @@ from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
 from src.models.target_encoder import create_target_encoder, update_target_encoder
 from src.optimizer import create_optimizer
-from src.train import train_step
+from src.train_step import train_step
 
 
 class TestTrainStep(unittest.TestCase):
@@ -96,7 +96,7 @@ class TestTrainStep(unittest.TestCase):
         source_before = self.encoder.patch_embed.proj.weight.detach().clone()
         teacher_before = self.teacher.patch_embed.proj.weight.detach().clone()
 
-        with mock.patch("src.train.update_target_encoder", wraps=update_target_encoder) as ema:
+        with mock.patch("src.train_step.update_target_encoder", wraps=update_target_encoder) as ema:
             first = train_step(
                 self.encoder, self.predictor, self.teacher, self.optimizer,
                 images[:1], self.context[:1], [indices[:1] for indices in self.targets],

@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from example.evaluate_knn import feature_statistics, select_per_class, weighted_knn
+from scripts.evaluate_knn import feature_statistics, select_per_class, weighted_knn
 
 
 class TestKnnEvaluation(unittest.TestCase):
