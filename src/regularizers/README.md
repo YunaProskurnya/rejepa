@@ -11,7 +11,7 @@ regularization = apply_regularization(features, args.regularizer)
 loss = prediction + args.regularizer_weight * regularization
 ```
 
-Второй аргумент — `"none"`, `"sigreg"` или `"visreg"`. Для `"none"` функция возвращает `0` и допускает `features=None`. Для `"sigreg"` и `"visreg"` `features` вычисляется обучаемым энкодером по полным изображениям в режиме `joint`. В режиме `ema` target encoder заморожен, поэтому регуляризация его эмбеддингов не обучит энкодер.
+Второй аргумент — `"none"`, `"sigreg"` или `"visreg"`. Для `"none"` функция возвращает `0` и допускает `features=None`. Для `"sigreg"` и `"visreg"` `features` вычисляется обучаемым энкодером по полным изображениям в режиме `joint`. Используется полный выход до дополнительной нормализации целей; маска контекста на этот проход не влияет. В режиме `ema` target encoder заморожен, поэтому регуляризация его эмбеддингов не обучит энкодер.
 
 ## Формулы VISReg
 

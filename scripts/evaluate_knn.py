@@ -97,7 +97,7 @@ def feature_statistics(features):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Frozen I-JEPA teacher weighted kNN on ImageFolder")
+    parser = argparse.ArgumentParser(description="Frozen encoder weighted kNN on ImageFolder")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--train", type=Path, required=True)
     parser.add_argument("--val", type=Path, required=True)
@@ -129,6 +129,8 @@ def main():
     if args.bf16 and device.type == "cuda" and not torch.cuda.is_bf16_supported():
         parser.error("the selected GPU does not support bfloat16")
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    mode = checkpoint["config"].get("mode", "ema")
+    evaluated_name = "encoder" if mode == "joint" else "target_encoder"
     model_options = checkpoint["config"]["encoder"]
     initialization_seed = checkpoint["config"].get("seed", args.seed)
     image_size = model_options.get("image_size", 224)
@@ -158,6 +160,7 @@ def main():
     query_loader = DataLoader(Subset(val, query_indices), **loader_options)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config.update(encoder=model_options, selected_classes=class_names,
+                  mode=mode, evaluated_model=evaluated_name,
                   initialization_seed=initialization_seed,
                   class_to_idx=train.class_to_idx, resize=resize_size, crop=image_size,
                   pooling="mean of patch tokens after encoder final LayerNorm, then L2 normalization",
@@ -165,11 +168,11 @@ def main():
                   checkpoint_step=checkpoint.get("step"), torch_version=str(torch.__version__))
     result = dict(config=config, reference_paths=[str(path) for path in reference_paths],
                   query_paths=[str(path) for path in query_paths], metrics={})
-    for name in ("target_encoder", "random_encoder") if args.compare_random else ("target_encoder",):
+    for name in (evaluated_name, "random_encoder") if args.compare_random else (evaluated_name,):
         torch.manual_seed(initialization_seed)
         encoder = VisionTransformer(**model_options)
-        if name == "target_encoder":
-            encoder.load_state_dict(checkpoint["target_encoder"], strict=True)
+        if name == evaluated_name:
+            encoder.load_state_dict(checkpoint[evaluated_name], strict=True)
         encoder.to(device).eval().requires_grad_(False)
         reference, reference_labels = extract_features(encoder, reference_loader, device, args.bf16)
         queries, query_labels = extract_features(encoder, query_loader, device, args.bf16)
@@ -183,7 +186,7 @@ def main():
         del encoder
     if args.compare_random:
         result["top1_gain_percentage_points"] = (
-            result["metrics"]["target_encoder"]["top1"] - result["metrics"]["random_encoder"]["top1"]
+            result["metrics"][evaluated_name]["top1"] - result["metrics"]["random_encoder"]["top1"]
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")

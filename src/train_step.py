@@ -1,12 +1,16 @@
+import math
+
 import torch
 
 from .losses import prediction_loss
 from .models.target_encoder import prepare_targets, update_target_encoder
+from .regularizers.apply_regularization import apply_regularization
 
 
 def train_step(encoder, predictor, target_encoder, optimizer,
                images, context_indices, target_indices, momentum, *,
-               precision="fp32", accumulation_steps=1, update=True, zero_grad=True):
+               precision="fp32", accumulation_steps=1, update=True, zero_grad=True,
+               mode="ema", regularizer="none", regularizer_weight=0.02):
     """Backpropagate one microbatch; update optimizer and EMA on the last one.
 
     For K equally sized microbatches, pass accumulation_steps=K throughout,
@@ -17,14 +21,29 @@ def train_step(encoder, predictor, target_encoder, optimizer,
         raise ValueError("precision must be fp32 or bf16")
     if not isinstance(accumulation_steps, int) or accumulation_steps <= 0:
         raise ValueError("accumulation_steps must be a positive integer")
+    if mode not in ("ema", "joint"):
+        raise ValueError("mode must be ema or joint")
+    if regularizer not in ("none", "sigreg", "visreg"):
+        raise ValueError("regularizer must be none, sigreg or visreg")
+    if not math.isfinite(regularizer_weight) or regularizer_weight < 0:
+        raise ValueError("regularizer_weight must be finite and nonnegative")
+    if mode == "ema" and (target_encoder is None or regularizer != "none"):
+        raise ValueError("ema requires a target encoder and no regularizer")
+    if mode == "joint" and target_encoder is not None:
+        raise ValueError("joint uses the encoder without a separate target encoder")
     if zero_grad:
         optimizer.zero_grad(set_to_none=True)
 
     with torch.autocast(images.device.type, dtype=torch.bfloat16, enabled=precision == "bf16"):
-        targets = prepare_targets(target_encoder, images, target_indices)
+        targets, features = prepare_targets(
+            encoder if mode == "joint" else target_encoder, images, target_indices,
+            joint=mode == "joint", return_features=True,
+        )
         context = encoder(images, context_indices)
         predictions = predictor(context, context_indices, target_indices)
-        loss = prediction_loss(predictions, targets)
+        prediction = prediction_loss(predictions, targets)
+        regularization = apply_regularization(features, regularizer)
+        loss = prediction + regularizer_weight * regularization
     if not torch.isfinite(loss).item():
         raise RuntimeError("Non-finite loss")
 
@@ -40,6 +59,13 @@ def train_step(encoder, predictor, target_encoder, optimizer,
         ).item()
 
         optimizer.step()
-        update_target_encoder(encoder, target_encoder, momentum)
+        if mode == "ema":
+            update_target_encoder(encoder, target_encoder, momentum)
 
-    return {"loss": loss.item(), "grad_norm": grad_norm}
+    metrics = {"loss": loss.item(), "grad_norm": grad_norm}
+    if mode == "joint":
+        metrics.update(
+            prediction_loss=prediction.item(),
+            regularization_loss=regularization.detach().item() if regularizer != "none" else 0.0,
+        )
+    return metrics

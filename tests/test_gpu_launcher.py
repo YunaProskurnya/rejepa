@@ -115,6 +115,67 @@ class TestGPULauncher(unittest.TestCase):
             checkpoint = torch.load(output / "checkpoint.pt", weights_only=True)
             self.assertEqual(checkpoint["encoder"]["patch_embed.proj.weight"].dtype, torch.float32)
 
+    def test_joint_checkpoint_and_resume_use_one_encoder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "joint"
+            options = ("--smoke-test", "--mode", "joint", "--output", output)
+            self.launch(*options, "--max-steps", "1")
+            first = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual(first["config"]["mode"], "joint")
+            self.assertEqual(first["config"]["regularizer"], "sigreg")
+            self.assertNotIn("target_encoder", first)
+            self.assertIn("encoder", first)
+            with (output / "metrics.csv").open(newline="", encoding="utf-8") as stream:
+                row = next(csv.DictReader(stream))
+            self.assertEqual(row["momentum"], "")
+            self.assertGreater(float(row["regularization_loss"]), 0)
+
+            self.launch(*options, "--max-steps", "2", "--resume", output / "checkpoint.pt")
+            resumed = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual(resumed["step"], 2)
+            self.assertNotIn("target_encoder", resumed)
+
+    def test_joint_visreg_bfloat16_smoke(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "joint-visreg"
+            self.launch("--smoke-test", "--mode", "joint", "--regularizer", "visreg",
+                        "--precision", "bf16", "--max-steps", "1", "--output", output)
+            with (output / "metrics.csv").open(newline="", encoding="utf-8") as stream:
+                row = next(csv.DictReader(stream))
+            self.assertTrue(math.isfinite(float(row["loss"])))
+            self.assertGreater(float(row["regularization_loss"]), 0)
+
+    def test_reference_collator_smoke(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "reference"
+            self.launch("--smoke-test", "--collator", "reference", "--max-steps", "1",
+                        "--output", output)
+            checkpoint = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual(checkpoint["config"]["collator"], "reference")
+
+    def test_resume_accepts_previous_ema_checkpoint_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "ema"
+            self.launch("--smoke-test", "--max-steps", "1", "--output", output)
+            checkpoint_path = output / "checkpoint.pt"
+            checkpoint = torch.load(checkpoint_path, weights_only=True)
+            config_path = output / "config.json"
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            for config in (checkpoint["config"], saved_config):
+                for key in ("collator", "mode", "regularizer", "regularizer_weight"):
+                    del config[key]
+                masks = config["masks"]
+                masks["M"] = masks.pop("npred")
+                del masks["nenc"]
+                del masks["allow_overlap"]
+            torch.save(checkpoint, checkpoint_path)
+            config_path.write_text(json.dumps(saved_config), encoding="utf-8")
+
+            self.launch("--smoke-test", "--max-steps", "2", "--output", output,
+                        "--resume", checkpoint_path)
+            resumed = torch.load(checkpoint_path, weights_only=True)
+            self.assertEqual(resumed["step"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
