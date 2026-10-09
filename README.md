@@ -21,33 +21,7 @@ python scripts/train.py --config configs/smoke.json
 
 ## ImageNet100
 
-Для скачивания нужны Kaggle CLI (включён в `requirements.txt`) с настроенным
-доступом к аккаунту и системная утилита `unzip`.
-[Установка и авторизация Kaggle CLI](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md).
-Ниже сохранены рабочие команды команды из `data_encoder` (`2202aa8`).
-Один раз выполните их в Linux/bash, используя пустую папку для датасета:
-
-```sh
-mkdir -p data/imagenet100
-(
-set -e
-cd data/imagenet100
-
-kaggle datasets download ambityga/imagenet100
-unzip imagenet100.zip
-rm imagenet100.zip
-
-mkdir train
-mv train.X*/* train/
-rmdir train.X*
-
-mkdir val
-mv val.X*/* val/
-rmdir val.X*
-)
-```
-
-Те же команды находятся в `scripts/setup_imagenet100.sh`; вместо блока выше
+Команды находятся в `scripts/setup_imagenet100.sh`; вместо блока выше
 можно выполнить `bash -e ../../scripts/setup_imagenet100.sh` из папки `data/imagenet100`.
 После подготовки получатся `data/imagenet100/train/<класс>/` и
 `data/imagenet100/val/<класс>/`. Конфиг обучения уже использует этот путь.
