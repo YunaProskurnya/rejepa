@@ -8,8 +8,9 @@ import sys
 import time
 
 import numpy as np
+import PIL
 import torch
-from torch.utils.data import DataLoader
+import torchvision
 from torchvision import datasets, transforms
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,10 +19,12 @@ sys.path.insert(0, str(ROOT))
 from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
 from src.models.target_encoder import create_target_encoder
+from src.config import parse_config_args
 from src.optimizer import create_optimizer
-from src.reference.multiblock import MaskCollator
+from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
+from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
-from src.train import train_step
+from src.train_step import train_step
 
 
 def seed_worker(worker_id):
@@ -30,13 +33,14 @@ def seed_worker(worker_id):
     np.random.seed(seed)
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Single-device I-JEPA training")
-    data_args = parser.add_mutually_exclusive_group(required=True)
-    data_args.add_argument("--data", type=Path)
-    data_args.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--config", type=Path, help="JSON experiment settings; CLI options take precedence")
+    parser.add_argument("--data", type=Path)
+    parser.add_argument("--smoke-test", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dataset", choices=("imagefolder", "cifar10"), default="imagefolder")
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "first-run")
+    parser.add_argument("--collator", choices=("custom", "reference"), default="custom")
     parser.add_argument("--model", choices=("tiny", "vit_base", "vit_large"), default="tiny")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--epochs", type=int, default=1)
@@ -59,7 +63,9 @@ def main():
     parser.add_argument("--final-weight-decay", type=float, default=0.4)
     parser.add_argument("--ema-start", type=float, default=0.996)
     parser.add_argument("--ema-end", type=float, default=1.0)
-    args = parser.parse_args()
+    args = parse_config_args(parser, argv)
+    if (args.data is not None) == args.smoke_test:
+        parser.error("choose exactly one of --data or --smoke-test (in JSON or on the command line)")
     if args.epochs <= 0 or args.batch_size <= 0 or args.num_workers < 0:
         parser.error("epochs/batch-size must be positive; num-workers must be nonnegative")
     if args.max_steps is not None and args.max_steps <= 0:
@@ -81,6 +87,12 @@ def main():
     )):
         parser.error("learning rates and weight decay must be finite and nonnegative")
 
+    return parser, args
+
+
+def main():
+    parser, args = parse_args()
+
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
     torch.manual_seed(args.seed)
@@ -96,10 +108,13 @@ def main():
     if device.type == "cpu":
         torch.set_num_threads(min(4, torch.get_num_threads()))
 
+    crop_options = dict(size=224, scale=(0.3, 1.0), ratio=(0.75, 4 / 3),
+                        interpolation=transforms.InterpolationMode.BILINEAR, antialias=True)
+    normalize_options = dict(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
     transform = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.3, 1.0)),
+        transforms.RandomResizedCrop(**crop_options),
         transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        transforms.Normalize(**normalize_options),
     ])
     if args.smoke_test:
         dataset = datasets.FakeData(size=8, image_size=(3, 256, 256), transform=transform)
@@ -130,7 +145,14 @@ def main():
         pred_mask_scale=(0.15, 0.2), aspect_ratio=(0.75, 1.5),
         nenc=1, npred=4, min_keep=10, allow_overlap=False,
     )
-    collator = MaskCollator(**mask_options)
+    if args.collator == "reference":
+        collator = ReferenceMaskCollator(**mask_options)
+    else:
+        if mask_options["nenc"] != 1 or mask_options["allow_overlap"]:
+            parser.error("custom collator supports one context and allow_overlap=False")
+        custom_options = {key: value for key, value in mask_options.items()
+                          if key not in ("nenc", "npred", "allow_overlap")}
+        collator = CustomMaskCollator(**custom_options, M=mask_options["npred"])
     batches_per_epoch = len(dataset) // args.batch_size
     if batches_per_epoch == 0:
         parser.error("dataset must contain at least batch-size images")
@@ -141,12 +163,13 @@ def main():
         "vit_base": (768, 12, 12, 384, 6),
         "vit_large": (1024, 24, 16, 384, 12),
     }[args.model]
-    model_options = dict(image_size=224, patch_size=16, embed_dim=embed_dim,
-                         depth=depth, num_heads=num_heads)
+    transformer_options = dict(mlp_ratio=4.0, qkv_bias=True, drop=0.0, attn_drop=0.0)
+    model_options = dict(image_size=224, patch_size=16, in_channels=3, embed_dim=embed_dim,
+                         depth=depth, num_heads=num_heads, **transformer_options)
     encoder = VisionTransformer(**model_options).to(device)
     predictor_options = dict(num_patches=encoder.num_patches, embed_dim=embed_dim,
                              predictor_embed_dim=predictor_dim,
-                             depth=predictor_depth, num_heads=num_heads)
+                             depth=predictor_depth, num_heads=num_heads, **transformer_options)
     predictor = VisionTransformerPredictor(**predictor_options).to(device)
     target_encoder = create_target_encoder(encoder)
     optimizer = create_optimizer(encoder, predictor, lr=args.lr, weight_decay=args.weight_decay)
@@ -172,8 +195,33 @@ def main():
                   batches_per_epoch=batches_per_epoch, updates_per_epoch=updates_per_epoch,
                   effective_batch_size=args.batch_size * args.accumulation_steps,
                   reference_commit="52c1ae95d05f743e000e8f10a1f3a79b10cff048")
-    if args.data is not None:
-        config["data"] = str(args.data.resolve())
+    # Record fixed settings as well as editable flags: checkpoints are self-describing.
+    config.update(
+        preprocessing=dict(
+            random_resized_crop={**crop_options, "interpolation": crop_options["interpolation"].value},
+            to_tensor=True, normalize=normalize_options,
+        ),
+        optimizer=dict(name="AdamW", defaults=optimizer.defaults,
+                       no_decay="parameter name contains 'bias' or parameter.ndim == 1"),
+        objective=dict(loss="smooth_l1", beta=1.0, reduction="mean per block, then mean across blocks",
+                       target_normalization="layer_norm over features", target_norm_eps=1e-5,
+                       target_update="EMA after optimizer.step", gradient_clipping=None),
+        schedules=dict(lr="warmup_cosine", weight_decay="cosine", ema="linear",
+                       unit="optimizer update", warmup_steps=args.warmup_epochs * updates_per_epoch,
+                       total_steps=total_steps),
+        architecture=dict(position_embedding="fixed_2d_sincos", layer_norm_eps=1e-6,
+                          initialization_std=0.02, residual_rescale="1 / sqrt(2 * layer_index)",
+                          attention="scaled_dot_product_attention", stochastic_depth=0.0),
+        data_loader=dict(drop_last=True, persistent_workers=False,
+                         sampler="randperm with seed + epoch", pin_memory=device.type == "cuda"),
+        smoke_data=dict(size=8, image_size=(3, 256, 256)) if args.smoke_test else None,
+        versions=dict(python=sys.version.split()[0], torchvision=str(torchvision.__version__),
+                      numpy=np.__version__, pillow=PIL.__version__),
+    )
+    for key in ("data", "output", "resume", "config"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = str(value.resolve())
     config = json.loads(json.dumps(config))
 
     step = 0
@@ -183,10 +231,11 @@ def main():
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
         compatible = (
-            "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test",
+            "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test", "collator",
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
             "precision", "lr", "start_lr", "final_lr", "warmup_epochs", "weight_decay",
             "final_weight_decay", "ema_start", "ema_end", "total_steps",
+            "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
         differences = [key for key in compatible if checkpoint["config"].get(key) != config.get(key)]
         if differences:
@@ -223,7 +272,7 @@ def main():
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     if args.smoke_test:
         print("Synthetic images: checks execution only, not representation quality.", flush=True)
-    print(f"model={args.model} device={device} precision={args.precision} images={len(dataset)} "
+    print(f"model={args.model} collator={args.collator} device={device} precision={args.precision} images={len(dataset)} "
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
@@ -271,11 +320,11 @@ def main():
                 len(dataset), generator=torch.Generator().manual_seed(args.seed + epoch),
             ).tolist()
             first_batch = next_batch if epoch == next_epoch else 0
-            loader = DataLoader(
+            loader = make_data_loader(
                 dataset, batch_size=args.batch_size, sampler=permutation[first_batch * args.batch_size:],
-                drop_last=True, num_workers=args.num_workers, collate_fn=collator,
+                drop_last=True, num_workers=args.num_workers, collator=collator,
                 generator=torch.Generator().manual_seed(args.seed + epoch), worker_init_fn=seed_worker,
-                pin_memory=device.type == "cuda",
+                pin_mem=device.type == "cuda",
             )
             iterator = iter(loader)
             batch_index = first_batch

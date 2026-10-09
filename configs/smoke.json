@@ -1,0 +1,12 @@
+{
+  "smoke_test": true,
+  "output": "runs/smoke",
+  "collator": "custom",
+  "model": "tiny",
+  "device": "cpu",
+  "precision": "fp32",
+  "batch_size": 2,
+  "epochs": 1,
+  "num_workers": 0,
+  "seed": 0
+}

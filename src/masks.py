@@ -9,6 +9,33 @@ logger = logging.getLogger(__name__)
 # patch grid. aspect_ratio is grid / grid.
 
 
+def sample_block_size(grid, scale, aspect_ratio, generator=None, device=None):
+    """Sample area/aspect as in I-JEPA; a supplied generator isolates size draws."""
+    if grid < 2:
+        raise ValueError("grid must contain at least 2 patches per side")
+    if device is None:
+        device = generator.device if generator is not None else torch.device("cpu")
+    unit = torch.rand((), generator=generator, device=device).item()
+    scale_min, scale_max = scale
+    ratio_min, ratio_max = aspect_ratio
+    area_fraction = scale_min + unit * (scale_max - scale_min)
+    ratio = ratio_min + unit * (ratio_max - ratio_min)
+    if not 0 < area_fraction <= 1 or not 0 < ratio < float("inf"):
+        raise ValueError("sampled scale must be in (0, 1] and aspect ratio positive and finite")
+    area = int(grid * grid * area_fraction)
+    block_h = min(round((area * ratio) ** 0.5), grid - 1)
+    block_w = min(round((area / ratio) ** 0.5), grid - 1)
+    if block_h < 1 or block_w < 1:
+        raise ValueError("sampled block is empty")
+    return block_h, block_w
+
+
+def _validate_block_size(grid, block_size):
+    if len(block_size) != 2 or any(not isinstance(side, int) or not 0 < side < grid for side in block_size):
+        raise ValueError("block_size must contain two positive integers smaller than grid")
+    return block_size
+
+
 def pick_target_patches(
     grid,
     M=4,
@@ -16,12 +43,14 @@ def pick_target_patches(
     scale=(0.15, 0.2),
     seed=0,
     device=None,
+    *, block_size=None,
 ):
     """Sample M target blocks on the patch grid.
 
     grid: grid length of the square patch grid. Indexes are row * grid + col.
 
     One block size is shared. Targets may overlap.
+    block_size may come from a collator; seed=None uses the current worker RNG.
 
     Output: list of M long tensors. Each tensor holds the patch indexes in that block.
     """
@@ -29,8 +58,9 @@ def pick_target_patches(
         device = torch.device("cpu")
     else:
         device = torch.device(device)
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device).manual_seed(seed)
 
     logger.debug(
         "target masks: grid=%dx%d M=%d scale=%s aspect_ratio=%s seed=%s device=%s",
@@ -43,23 +73,9 @@ def pick_target_patches(
         device,
     )
 
-    scale_min, scale_max = scale
-    ratio_min, ratio_max = aspect_ratio
-    u = torch.rand((), device=device, generator=generator).item()
-    scale = scale_min + u * (scale_max - scale_min)
-    ratio = ratio_min + u * (ratio_max - ratio_min)
-    area = int(grid * grid * scale)
-    block_h = min(round((area * ratio) ** 0.5), grid - 1)
-    block_w = min(round((area / ratio) ** 0.5), grid - 1)
-
-    logger.debug(
-        "target size scale=%.4f ratio=%.4f -> h=%d w=%d area=%d",
-        scale,
-        ratio,
-        block_h,
-        block_w,
-        area,
-    )
+    if block_size is None:
+        block_size = sample_block_size(grid, scale, aspect_ratio, generator, device)
+    block_h, block_w = _validate_block_size(grid, block_size)
 
     blocks = []
     for index in range(M):
@@ -87,6 +103,7 @@ def pick_context_patches(
     min_keep=10,
     allow_overlap=False,
     device=None,
+    *, block_size=None,
 ):
     """Sample the context crop and drop target patches from it.
 
@@ -97,7 +114,8 @@ def pick_context_patches(
         One long tensor per target.
 
     The crop is kept when more than min_keep patches remain. allow_overlap
-    leaves every target patch in the context mask.
+    leaves every target patch in the context mask. As in the reference, exclusions
+    are relaxed after 20 failures. seed=None uses the current worker RNG.
 
     Returns:
         context_patches_indices: long tensor of kept patch indexes, shape [K].
@@ -106,8 +124,9 @@ def pick_context_patches(
         device = torch.device("cpu")
     else:
         device = torch.device(device)
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device).manual_seed(seed)
 
     logger.debug(
         "context mask: grid=%dx%d scale=%s aspect_ratio=%s seed=%s targets=%d min_keep=%d allow_overlap=%s device=%s",
@@ -122,25 +141,11 @@ def pick_context_patches(
         device,
     )
 
-    scale_min, scale_max = scale
-    ratio_min, ratio_max = aspect_ratio
-    u = torch.rand((), device=device, generator=generator).item()
-    scale = scale_min + u * (scale_max - scale_min)
-    ratio = ratio_min + u * (ratio_max - ratio_min)
-    area = int(grid * grid * scale)
-    block_h = min(round((area * ratio) ** 0.5), grid - 1)
-    block_w = min(round((area / ratio) ** 0.5), grid - 1)
-
-    # 1. Sample context crop
-
-    logger.debug(
-        "context size scale=%.4f ratio=%.4f -> h=%d w=%d area=%d",
-        scale,
-        ratio,
-        block_h,
-        block_w,
-        area,
-    )
+    if block_size is None:
+        block_size = sample_block_size(grid, scale, aspect_ratio, generator, device)
+    block_h, block_w = _validate_block_size(grid, block_size)
+    if min_keep < 0 or block_h * block_w <= min_keep:
+        raise ValueError("context block must contain more than nonnegative min_keep patches")
 
     if allow_overlap:
         exclusions = []

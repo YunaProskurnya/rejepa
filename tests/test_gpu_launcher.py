@@ -12,7 +12,7 @@ import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = ROOT / "example/train_dataset.py"
+LAUNCHER = ROOT / "scripts/train.py"
 
 
 class TestGPULauncher(unittest.TestCase):
@@ -28,51 +28,80 @@ class TestGPULauncher(unittest.TestCase):
         return result
 
     def test_accumulation_resume_matches_uninterrupted_cpu_run(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            resumed = root / "resumed"
-            whole = root / "whole"
-            arguments = ["--smoke-test", "--epochs", "2", "--accumulation-steps", "3",
-                         "--checkpoint-every", "1", "--benchmark-warmup", "1"]
-            self.launch(*arguments, "--max-steps", "3", "--output", resumed)
-            before = torch.load(resumed / "checkpoint.pt", weights_only=True)
-            self.assertEqual(before["step"], 3)
-            self.assertEqual(before["next_epoch"], 1)
-            self.assertEqual(before["next_batch"], 3)
-            self.assertEqual(before["microbatches_seen"], 7)
-            self.assertEqual(before["lr_schedule_step"], 3)
-            self.assertEqual(before["wd_schedule_step"], 3)
-            self.launch(*arguments, "--max-steps", "4", "--output", resumed,
-                        "--resume", resumed / "checkpoint.pt")
-            self.launch(*arguments, "--max-steps", "4", "--output", whole)
-            checkpoint = torch.load(resumed / "checkpoint.pt", weights_only=True)
-            reference = torch.load(whole / "checkpoint.pt", weights_only=True)
-            self.assertEqual(checkpoint["step"], 4)
-            self.assertEqual(checkpoint["next_epoch"], 2)
-            self.assertEqual(checkpoint["next_batch"], 0)
-            for component in ("encoder", "predictor", "target_encoder"):
-                for name, value in checkpoint[component].items():
-                    torch.testing.assert_close(value, reference[component][name], rtol=0, atol=0)
-            self.assertTrue(all(state["step"].item() == 4 for state in checkpoint["optimizer"]["state"].values()))
-            with (resumed / "metrics.csv").open(newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual([int(row["step"]) for row in rows], [1, 2, 3, 4])
-            self.assertEqual([int(row["images"]) for row in rows], [6, 2, 6, 2])
-            self.assertEqual(rows[0]["steady_images_per_second"], "")
-            self.assertGreater(float(rows[1]["steady_images_per_second"]), 0)
-            self.assertEqual(float(rows[-1]["weight_decay"]), 0.4)
-            for row in rows:
-                self.assertTrue(math.isfinite(float(row["loss"])))
-                self.assertGreater(float(row["grad_norm"]), 0)
+        for collator in ("reference", "custom"):
+            with self.subTest(collator=collator):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    resumed = root / "resumed"
+                    whole = root / "whole"
+                    arguments = ["--collator", collator, "--smoke-test", "--epochs", "2", "--accumulation-steps", "3",
+                                 "--checkpoint-every", "1", "--benchmark-warmup", "1"]
+                    self.launch(*arguments, "--max-steps", "3", "--output", resumed)
+                    before = torch.load(resumed / "checkpoint.pt", weights_only=True)
+                    self.assertEqual(before["step"], 3)
+                    self.assertEqual(before["next_epoch"], 1)
+                    self.assertEqual(before["next_batch"], 3)
+                    self.assertEqual(before["microbatches_seen"], 7)
+                    self.assertEqual(before["lr_schedule_step"], 3)
+                    self.assertEqual(before["wd_schedule_step"], 3)
+                    self.launch(*arguments, "--max-steps", "4", "--output", resumed,
+                                "--resume", resumed / "checkpoint.pt")
+                    self.launch(*arguments, "--max-steps", "4", "--output", whole)
+                    checkpoint = torch.load(resumed / "checkpoint.pt", weights_only=True)
+                    reference = torch.load(whole / "checkpoint.pt", weights_only=True)
+                    self.assertEqual(checkpoint["step"], 4)
+                    self.assertEqual(checkpoint["next_epoch"], 2)
+                    self.assertEqual(checkpoint["next_batch"], 0)
+                    for component in ("encoder", "predictor", "target_encoder"):
+                        for name, value in checkpoint[component].items():
+                            torch.testing.assert_close(value, reference[component][name], rtol=0, atol=0)
+                    self.assertTrue(all(state["step"].item() == 4 for state in checkpoint["optimizer"]["state"].values()))
+                    with (resumed / "metrics.csv").open(newline="", encoding="utf-8") as stream:
+                        rows = list(csv.DictReader(stream))
+                    self.assertEqual([int(row["step"]) for row in rows], [1, 2, 3, 4])
+                    self.assertEqual([int(row["images"]) for row in rows], [6, 2, 6, 2])
+                    self.assertEqual(rows[0]["steady_images_per_second"], "")
+                    self.assertGreater(float(rows[1]["steady_images_per_second"]), 0)
+                    self.assertEqual(float(rows[-1]["weight_decay"]), 0.4)
+                    for row in rows:
+                        self.assertTrue(math.isfinite(float(row["loss"])))
+                        self.assertGreater(float(row["grad_norm"]), 0)
 
     def test_resume_rejects_changed_batch_size(self):
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "run"
-            self.launch("--smoke-test", "--max-steps", "1", "--output", output)
-            result = self.launch("--smoke-test", "--batch-size", "4", "--output", output,
+            root = Path(temporary)
+            output = root / "run"
+            experiment = root / "experiment.json"
+            settings = dict(smoke_test=True, max_steps=1, output=str(output), batch_size=2)
+            experiment.write_text(json.dumps(settings), encoding="utf-8")
+            self.launch("--config", experiment)
+            settings["batch_size"] = 4
+            experiment.write_text(json.dumps(settings), encoding="utf-8")
+            result = self.launch("--config", experiment,
                                  "--resume", output / "checkpoint.pt", success=False)
             self.assertIn("resume configuration differs", result.stderr)
             self.assertIn("batch_size", result.stderr)
+            saved = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual(saved["config"]["batch_size"], 2)
+
+    def test_resume_rejects_changed_collator(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            self.launch("--smoke-test", "--collator", "reference", "--max-steps", "1", "--output", output)
+            checkpoint_path = output / "checkpoint.pt"
+            config_path = output / "config.json"
+
+            result = self.launch("--smoke-test", "--max-steps", "2",
+                                 "--output", output, "--resume", checkpoint_path, success=False)
+            self.assertIn("resume configuration differs: collator", result.stderr)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["collator"], "reference")
+            self.assertEqual(torch.load(checkpoint_path, weights_only=True)["step"], 1)
+
+            self.launch("--smoke-test", "--collator", "reference", "--max-steps", "2", "--output", output,
+                        "--resume", checkpoint_path)
+            resumed = torch.load(checkpoint_path, weights_only=True)
+            self.assertEqual(resumed["step"], 2)
+            self.assertEqual(resumed["config"]["collator"], "reference")
 
     def test_time_budget_stops_and_saves_restartable_state(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -81,6 +110,7 @@ class TestGPULauncher(unittest.TestCase):
             self.assertIn("max-seconds reached", result.stdout)
             checkpoint = torch.load(output / "checkpoint.pt", weights_only=True)
             self.assertEqual(checkpoint["step"], 0)
+            self.assertEqual(checkpoint["config"]["collator"], "custom")
             self.assertEqual(checkpoint["next_epoch"], 0)
             self.assertEqual(checkpoint["next_batch"], 0)
             self.launch("--smoke-test", "--max-steps", "1", "--output", output,
@@ -96,7 +126,7 @@ class TestGPULauncher(unittest.TestCase):
                 for index in range(2):
                     shutil.copyfile(ROOT / "example/lenna.png", folder / f"{index}.png")
             output = root / "run"
-            self.launch("--data", root / "images", "--class-subset-count", "2", "--precision", "bf16",
+            self.launch("--data", root / "images", "--collator", "custom", "--class-subset-count", "2", "--precision", "bf16",
                         "--max-steps", "1", "--output", output)
             config = json.loads((output / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config["images"], 4)
