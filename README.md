@@ -40,6 +40,14 @@ weight decay — `0.04`, EMA momentum — `0.996`; расписаний пока
 ```sh
 kaggle datasets download ambityga/imagenet100
 unzip imagenet100.zip
+
+mkdir train
+mv train.X*/* train/
+rmdir train.X*
+
+mkdir val
+mv val.X*/* val/
+rmdir val.X*
 ```
 
 ## Регуляризация эмбеддингов
@@ -50,7 +58,7 @@ unzip imagenet100.zip
 
 `evaluate_linear_probe` использует target encoder без обновления весов, усредняет его патч-токены и обучает один `nn.Linear`. Возвращает точность top-1 на валидации.
 
-Когда общий загрузчик будет готов, передать два загрузчика батчей `(images, labels)` с одинаковой нумерацией классов. Для оценки нужны полные изображения без масок:
+Для оценки передать два загрузчика батчей `(images, labels)` с одинаковой нумерацией классов. `MaskCollator` здесь не нужен: требуются полные изображения без масок.
 
 ```python
 from src.eval_linear import evaluate_linear_probe

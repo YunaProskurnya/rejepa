@@ -46,9 +46,12 @@ def process_image(image_path, image_size=224, patch_size=16, seed=0, device=None
     image = image.to(torch.device("cpu") if device is None else device)
 
     grid = image_size // patch_size
-    target_patches_indices = masks.pick_target_patches(grid, seed=seed, device=device)
+    torch.manual_seed(seed)
+    target_size = masks.sample_block_size(grid, (0.15, 0.2), (0.75, 1.5))
+    context_size = masks.sample_block_size(grid, (0.85, 1.0), (1.0, 1.0))
+    target_patches_indices = masks.pick_target_patches(grid, target_size)
     context_patches_indices = masks.pick_context_patches(
-        grid, target_patches_indices, seed=seed, device=device
+        grid, target_patches_indices, context_size
     )
 
     return image, target_patches_indices, context_patches_indices

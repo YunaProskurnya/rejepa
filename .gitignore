@@ -225,3 +225,5 @@ train.X3
 train.X4
 val.X
 .local/
+train/
+val/
