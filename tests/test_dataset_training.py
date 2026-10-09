@@ -84,11 +84,11 @@ class TestDatasetTraining(unittest.TestCase):
             self.assertGreater(float(rows[-1]["momentum"]), float(rows[0]["momentum"]))
 
             checkpoint = torch.load(output / "checkpoint.pt", map_location="cpu", weights_only=True)
-            epoch_checkpoint = torch.load(output / "checkpoint-epoch-1.pt", map_location="cpu", weights_only=True)
+            epoch_checkpoint = torch.load(output / "checkpoint_0.pt", map_location="cpu", weights_only=True)
             self.assertEqual(epoch_checkpoint["step"], 4)
             self.assertEqual(epoch_checkpoint["next_epoch"], 1)
             self.assertEqual(epoch_checkpoint["next_batch"], 0)
-            self.assertFalse((output / "checkpoint-epoch-2.pt").exists())
+            self.assertFalse((output / "checkpoint_1.pt").exists())
             self.assertEqual(checkpoint["config"], config)
             self.assertEqual(config["encoder"]["mlp_ratio"], 4.0)
             self.assertEqual(config["optimizer"]["defaults"]["betas"], [0.9, 0.999])

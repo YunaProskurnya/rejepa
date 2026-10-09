@@ -144,7 +144,7 @@ python scripts/train.py --config configs/smoke.json --collator reference --outpu
 - `config.json` — полная фактическая конфигурация запуска после объединения JSON и CLI;
 - `metrics.csv` — loss, градиенты, расписания, скорость и память GPU;
 - `checkpoint.pt` — модели, оптимизатор, расписания, генераторы случайных чисел и прогресс.
-- `checkpoint-epoch-N.pt` — отдельный checkpoint после каждой полностью завершённой эпохи.
+- `checkpoint_0.pt`, `checkpoint_1.pt`, … — отдельный checkpoint после каждой полностью завершённой эпохи, с нумерацией от нуля; сохраняется по умолчанию.
 
 В `config.json` и `checkpoint["config"]` сохраняются одинаковые параметры:
 итоговые аргументы, модели со значениями по умолчанию, маски, preprocessing,
@@ -158,7 +158,7 @@ objective, optimizer, schedules, версии библиотек и список
 Checkpoint обновляется каждые `--checkpoint-every` шагов оптимизатора (по умолчанию
 100), в конце эпохи и при штатной остановке. Для продолжения повторите исходную
 команду с тем же `--output` и добавьте `--resume path/to/checkpoint.pt`.
-Для продолжения с конкретной эпохи используйте `--resume path/to/checkpoint-epoch-N.pt`.
+Для продолжения с конкретной эпохи используйте `--resume path/to/checkpoint_N.pt` (N — индекс эпохи от нуля).
 
 Отдельный флаг для сохранения каждой эпохи не нужен. Пример запуска:
 
@@ -170,7 +170,7 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --output runs
 
 ```sh
 python scripts/train.py --config configs/imagenet100_vit_base.json \
-  --output runs/my-run --resume runs/my-run/checkpoint-epoch-1.pt
+  --output runs/my-run --resume runs/my-run/checkpoint_0.pt
 ```
 
 `--checkpoint-every 100` задаёт дополнительные сохранения в `checkpoint.pt`

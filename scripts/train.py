@@ -286,7 +286,7 @@ def main():
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
-    def save_checkpoint():
+    def save_checkpoint(completed_epoch=None):
         numpy_state = np.random.get_state()
         temporary = args.output / "checkpoint.tmp"
         torch.save({
@@ -300,6 +300,10 @@ def main():
             "cuda_rng_states": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
         }, temporary)
         temporary.replace(args.output / "checkpoint.pt")
+
+        if completed_epoch is not None:
+            shutil.copyfile(args.output / "checkpoint.pt", temporary)
+            temporary.replace(args.output / f"checkpoint_{completed_epoch}.pt")
 
     fieldnames = [
         "step", "epoch", "loss", "grad_norm", "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
@@ -413,11 +417,7 @@ def main():
                     stop = True
                     stop_reason = "max-steps reached"
                     break
-            save_checkpoint()
-            if next_epoch == epoch + 1 and next_batch == 0:
-                temporary = args.output / "checkpoint.tmp"
-                shutil.copyfile(args.output / "checkpoint.pt", temporary)
-                temporary.replace(args.output / f"checkpoint-epoch-{next_epoch}.pt")
+            save_checkpoint(completed_epoch=epoch if next_epoch == epoch + 1 and next_batch == 0 else None)
             del iterator
         if session_updates == 0:
             save_checkpoint()
