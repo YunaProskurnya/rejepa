@@ -1,4 +1,9 @@
+# Direct dependencies for src/, scripts/, example/ and tests/.
+# For GPU, install a compatible CUDA build of torch/torchvision first:
+# https://pytorch.org/get-started/locally/
 torch>=2.0
 torchvision>=0.15
 numpy
 Pillow
+
+kaggle
