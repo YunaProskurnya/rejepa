@@ -54,15 +54,13 @@ python example/train_dataset.py --dataset cifar10 --data /path/to/datasets --bat
 Для них используется `MaskCollator` из `src/datasets/imagenet100.py`, добавленный
 в ветке `data_encoder`.
 
-Для загрузки ImageNet100 из Kaggle:
+Для загрузки и подготовки ImageNet100 из корня репозитория нужны `kaggle` и `unzip`:
 
 ```sh
-kaggle datasets download ambityga/imagenet100
-unzip imagenet100.zip
-mkdir train val
-mv train.X*/* train/
-mv val.X*/* val/
+bash setup_imagenet100.sh
 ```
+
+Скрипт удаляет ZIP после распаковки и складывает изображения в `train/` и `val/`.
 
 Основные параметры:
 
