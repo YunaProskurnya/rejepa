@@ -1,4 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
 torch>=2.0
 torchvision>=0.15
 numpy
 Pillow
+
+kaggle

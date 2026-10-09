@@ -21,7 +21,8 @@ python scripts/train.py --config configs/smoke.json
 
 ## ImageNet100
 
-Для скачивания нужны Kaggle CLI с настроенным доступом к аккаунту и `unzip`.
+Для скачивания нужны Kaggle CLI (включён в `requirements.txt`) с настроенным
+доступом к аккаунту и системная утилита `unzip`.
 [Установка и авторизация Kaggle CLI](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md).
 Один раз выполните скрипт из `data_encoder` в пустой папке для датасета:
 
@@ -46,15 +47,24 @@ mkdir -p data/imagenet100
 
 Запускайте внутри выделенной GPU-задачи или контейнера кластера, где доступна
 одна H200. Скрипт использует одно устройство, запускайте обычным `python`.
-Проверка окружения и короткий запуск:
+Проверка окружения и запуск на 10 эпох:
 
 ```sh
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.cuda.get_device_name()); print('BF16:', torch.cuda.is_bf16_supported())"
 python scripts/train.py --config configs/imagenet100_vit_base.json
 ```
 
-Это ViT-B/16, BF16, batch size 32 и наш collator. Конфиг ограничен **20 шагами**.
-При успешном завершении в `runs/imagenet100-vit-base/` появятся `config.json`,
+Базовый конфиг: ViT-B/16, BF16, batch size 128 без накопления градиентов,
+наш collator и **10 полных эпох**, без ограничения числа шагов.
+Одна эпоха отведена под warmup. Learning rate растёт от `6.25e-6` до `6.25e-5`,
+затем снижается по косинусу до `6.25e-8`. Эти три значения взяты из
+[статьи I-JEPA, приложение A.1](https://arxiv.org/pdf/2301.08243)
+и умножены на `128 / 2048` для меньшего батча. Такое масштабирование — наш
+стартовый выбор для короткого запуска; его качество ещё предстоит проверить.
+Цель запуска — проверить стабильность обучения на ImageNet100 и затем оценить
+качество представлений через kNN.
+
+При успешном завершении в `runs/imagenet100-vit-base-10ep/` появятся `config.json`,
 `metrics.csv` и `checkpoint.pt`. В метриках смотрите `loss`, `grad_norm`,
 `steady_images_per_second` и `cuda_peak_memory_mb`.
 Для другого запуска задайте новый `output`, при нехватке памяти уменьшите batch size.
@@ -67,26 +77,17 @@ python scripts/train.py --config configs/imagenet100_vit_base.json
 Относительные пути считаются от текущей рабочей папки.
 Все команды здесь нужно выполнять из корня репозитория.
 
-Для нового эксперимента скопируйте `configs/imagenet100_vit_base.json`, например
-в `configs/experiment_01.json`, и замените `data` на путь к train,
-а `output` — на отдельную папку результатов, например `runs/experiment-01`.
-Затем запустите:
-
-```sh
-python scripts/train.py --config configs/experiment_01.json
-```
-
-Исходный пример `configs/imagenet100_vit_base.json` ограничен 20 шагами,
-с расписанием на 10 эпох и warmup в одну эпоху. Это стартовые параметры,
-а не проверенный научный протокол. Для полного обучения задайте нужные
-`epochs` и `warmup_epochs`, а `max_steps` замените на `null`.
+Основной конфиг — `configs/imagenet100_vit_base.json`. При необходимости измените
+в нём `data` на путь к train и `output` на отдельную папку результатов.
+`configs/smoke.json` оставлен только для быстрой проверки на CPU.
+В основном конфиге `max_steps: null` позволяет пройти все заданные эпохи.
 Ограничение `max_steps` относится к суммарному числу шагов оптимизатора;
 длительность расписаний по-прежнему определяется `epochs`.
 
 Разовое изменение удобно передать через CLI:
 
 ```sh
-python scripts/train.py --config configs/experiment_01.json --batch-size 8 --accumulation-steps 4 --output runs/experiment-01-small-batch
+python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 32 --accumulation-steps 4 --output runs/imagenet100-vit-base-10ep-small-batch
 ```
 
 Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
@@ -149,7 +150,7 @@ kNN проверяет, насколько хорошо классы разде�
 более близких соседей. Отдельный классификатор не обучается.
 
 ```sh
-python scripts/evaluate_knn.py --checkpoint runs/experiment-01/checkpoint.pt --train /path/to/dataset/train --val /path/to/dataset/val --compare-random --output runs/experiment-01/knn.json
+python scripts/evaluate_knn.py --checkpoint runs/imagenet100-vit-base-10ep/checkpoint.pt --train data/imagenet100/train --val data/imagenet100/val --device cuda --bf16 --compare-random --output runs/imagenet100-vit-base-10ep/knn.json
 ```
 
 По умолчанию оценка идёт на CPU, с 20 соседями, 20 reference-изображениями из train

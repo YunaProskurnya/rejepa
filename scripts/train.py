@@ -20,8 +20,9 @@ from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
 from src.models.target_encoder import create_target_encoder
 from src.config import parse_config_args
-from src.datasets.imagenet100 import MaskCollator, make_data_loader
+from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.optimizer import create_optimizer
+from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
 from src.train_step import train_step
 
@@ -39,6 +40,7 @@ def parse_args(argv=None):
     parser.add_argument("--smoke-test", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dataset", choices=("imagefolder", "cifar10"), default="imagefolder")
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "first-run")
+    parser.add_argument("--collator", choices=("custom", "reference"), default="custom")
     parser.add_argument("--model", choices=("tiny", "vit_base", "vit_large"), default="tiny")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--epochs", type=int, default=1)
@@ -141,9 +143,14 @@ def main():
     mask_options = dict(
         input_size=224, patch_size=16, enc_mask_scale=(0.85, 1.0),
         pred_mask_scale=(0.15, 0.2), aspect_ratio=(0.75, 1.5),
-        M=4, min_keep=10,
+        nenc=1, npred=4, min_keep=10, allow_overlap=False,
     )
-    collator = MaskCollator(**mask_options)
+    if args.collator == "reference":
+        collator = ReferenceMaskCollator(**mask_options)
+    else:
+        custom_options = {key: value for key, value in mask_options.items()
+                          if key not in ("nenc", "npred", "allow_overlap")}
+        collator = CustomMaskCollator(**custom_options, M=mask_options["npred"])
     batches_per_epoch = len(dataset) // args.batch_size
     if batches_per_epoch == 0:
         parser.error("dataset must contain at least batch-size images")
@@ -222,7 +229,7 @@ def main():
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
         compatible = (
-            "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test",
+            "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test", "collator",
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
             "precision", "lr", "start_lr", "final_lr", "warmup_epochs", "weight_decay",
             "final_weight_decay", "ema_start", "ema_end", "total_steps",
@@ -263,7 +270,7 @@ def main():
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     if args.smoke_test:
         print("Synthetic images: checks execution only, not representation quality.", flush=True)
-    print(f"model={args.model} device={device} precision={args.precision} images={len(dataset)} "
+    print(f"model={args.model} collator={args.collator} device={device} precision={args.precision} images={len(dataset)} "
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
