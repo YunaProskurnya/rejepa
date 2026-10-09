@@ -3,6 +3,9 @@
 Пока поддерживается один набор индексов [B,K], без stochastic depth.
 """
 
+import math
+
+import torch
 import torch.nn as nn
 
 from .block import Block
@@ -37,6 +40,15 @@ class VisionTransformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim, eps=1e-6)
         self.apply(self._init_weights)
+        self._rescale_residual_weights()
+
+    @torch.no_grad()
+    def _rescale_residual_weights(self):
+        # Авторская инициализация I-JEPA уменьшает вклад глубоких residual-ветвей.
+        for layer_id, block in enumerate(self.blocks, start=1):
+            scale = math.sqrt(2.0 * layer_id)
+            block.attn.proj.weight.div_(scale)
+            block.mlp.fc2.weight.div_(scale)
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Conv2d)):

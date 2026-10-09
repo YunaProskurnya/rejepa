@@ -20,7 +20,7 @@ class Block(nn.Module):
 
     def forward(self, x):
         """[B,N,D] -> [B,N,D]."""
-        attention_out, _ = self.attn(self.norm1(x))
+        attention_out, _ = self.attn(self.norm1(x), need_weights=False)
         x = x + attention_out
         x = x + self.mlp(self.norm2(x))
         return x

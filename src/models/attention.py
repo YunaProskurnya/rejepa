@@ -1,6 +1,7 @@
 """Multi-head self-attention для encoder и predictor I-JEPA."""
 
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Attention(nn.Module):
@@ -19,8 +20,8 @@ class Attention(nn.Module):
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
-        """[B,N,D] -> (выход [B,N,D], веса после dropout [B,H,N,N])."""
+    def forward(self, x, need_weights=True):
+        """[B,N,D] -> (выход, веса [B,H,N,N] или None при need_weights=False)."""
         B, N, D = x.shape
 
         qkv = self.qkv(x)
@@ -28,11 +29,16 @@ class Attention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        scores = (q @ k.transpose(-2, -1)) * self.scale
-        weights = scores.softmax(dim=-1)
-        weights = self.attn_drop(weights)
-
-        out = weights @ v
+        if need_weights:
+            scores = (q @ k.transpose(-2, -1)) * self.scale
+            weights = scores.softmax(dim=-1)
+            weights = self.attn_drop(weights)
+            out = weights @ v
+        else:
+            out = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
+            weights = None
         out = out.transpose(1, 2).reshape(B, N, D)
         out = self.proj(out)
         out = self.proj_drop(out)
