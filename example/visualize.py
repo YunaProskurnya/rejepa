@@ -17,7 +17,7 @@ from torchvision.io import ImageReadMode, read_image
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.masks import pick_context_patches, pick_target_patches
+from src.masks import pick_context_patches, pick_target_patches, sample_block_size
 from src.transforms import make_transform, process_image
 
 IMAGE_PATH = REPO_ROOT / "example" / "lenna.png"
@@ -113,17 +113,12 @@ def _sample_context_rectangle(
     min_keep=10,
     allow_overlap=False,
 ):
-    device = torch.device("cpu")
-    generator = torch.Generator(device=device)
-    generator.manual_seed(seed)
-    scale_min, scale_max = scale
-    ratio_min, ratio_max = aspect_ratio
-    u = torch.rand((), device=device, generator=generator).item()
-    scale = scale_min + u * (scale_max - scale_min)
-    ratio = ratio_min + u * (ratio_max - ratio_min)
-    area = int(side * side * scale)
-    block_h = min(round((area * ratio) ** 0.5), side - 1)
-    block_w = min(round((area / ratio) ** 0.5), side - 1)
+    torch.manual_seed(seed)
+    target_h, target_w = sample_block_size(side, (0.15, 0.2), (0.75, 1.5))
+    block_h, block_w = sample_block_size(side, scale, aspect_ratio)
+    for _ in range(4):
+        torch.randint(0, side - target_h, ())
+        torch.randint(0, side - target_w, ())
 
     if allow_overlap:
         exclusions = []
@@ -132,8 +127,8 @@ def _sample_context_rectangle(
     dropped = 0
     attempts = 0
     while True:
-        top = torch.randint(0, side - block_h, (), device=device, generator=generator).item()
-        left = torch.randint(0, side - block_w, (), device=device, generator=generator).item()
+        top = torch.randint(0, side - block_h, ()).item()
+        left = torch.randint(0, side - block_w, ()).item()
         kept = _rectangle_indices(top, left, block_h, block_w, side)
         active = exclusions[: max(len(exclusions) - dropped, 0)]
         if active:
@@ -370,8 +365,11 @@ def main():
     if (grid, patch_size, grid * grid) != (14, 16, PATCH_NUM):
         raise SystemExit(f"unexpected patch grid {grid}x{grid} patch {patch_size}")
 
-    fresh_targets = pick_target_patches(grid, seed=SEED)
-    fresh_context = pick_context_patches(grid, fresh_targets, seed=SEED)
+    torch.manual_seed(SEED)
+    target_size = sample_block_size(grid, (0.15, 0.2), (0.75, 1.5))
+    context_size = sample_block_size(grid, (0.85, 1.0), (1.0, 1.0))
+    fresh_targets = pick_target_patches(grid, target_size)
+    fresh_context = pick_context_patches(grid, fresh_targets, context_size)
     for got, expected in zip(target_indices, fresh_targets):
         if not torch.equal(got, expected):
             raise SystemExit("process_image targets do not match pick_target_patches")

@@ -1,56 +1,165 @@
+import os
 from logging import getLogger
+from multiprocessing import Value
+import math
+
 import torch
 import torchvision
-import numpy as np
 
+from masks import pick_context_patches, pick_target_patches, sample_block_size
+
+_GLOBAL_SEED = 0
 logger = getLogger()
 
-class ImageNet(torchvision.datasets.ImageFolder):
+
+class MaskCollator(object):
     def __init__(
         self,
-        root,
-        image_folder='imagenet_full_size/061417/',
-        tar_file='imagenet_full_size-061417.tar.gz',
-        transform=None,
-        train=True,
-        job_id=None,
-        local_rank=None,
-        copy_data=True,
-        index_targets=False
+        input_size=(224, 224),
+        patch_size=16,
+        enc_mask_scale=(0.85, 1.0),
+        pred_mask_scale=(0.15, 0.2),
+        aspect_ratio=(0.75, 1.5),
+        M=4,
+        min_keep=10,
     ):
+        super(MaskCollator, self).__init__()
+        if not isinstance(input_size, tuple):
+            input_size = (input_size,) * 2
+        self.patch_size = patch_size
+        self.height, self.width = (
+            input_size[0] // patch_size,
+            input_size[1] // patch_size,
+        )
+        self.enc_mask_scale = enc_mask_scale
+        self.pred_mask_scale = pred_mask_scale
+        self.aspect_ratio = aspect_ratio
+        self.M = M
+        self.min_keep = min_keep  # minimum number of patches to keep
+        self._itr_counter = Value("i", -1)  # collator is shared across worker processes
+
+    def step(self):
+        i = self._itr_counter
+        with i.get_lock():
+            i.value += 1
+            v = i.value
+        return v
+
+    def __call__(self, batch):
         """
-        ImageNet
-
-        Dataset wrapper (can copy data locally to machine)
-
-        :param root: root network directory for ImageNet data
-        :param image_folder: path to images inside root network directory
-        :param tar_file: zipped image_folder inside root network directory
-        :param train: whether to load train data (or validation)
-        :param job_id: scheduler job-id used to create dir on local machine
-        :param copy_data: whether to copy data from network file locally
-        :param index_targets: whether to index the id of each labeled image
+        Create encoder and predictor masks when collating imgs into a batch
+        # 1. sample enc block (size + location) using seed
+        # 2. sample pred block (size) using seed
+        # 3. sample several enc block locations for each image (w/o seed)
+        # 4. sample several pred block locations for each image (w/o seed)
+        # 5. return enc mask and pred mask
         """
+        B = len(batch)
 
-        
+        collated_batch = torch.utils.data.default_collate(batch)
+        collated_masks_target, collated_masks_context = [], []
+        min_target_size = self.height * self.width
+        min_context_size = self.height * self.width
+        assert self.height == self.width, "height and width must be equal"
+
+        seed = self.step()
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        target_size = sample_block_size(
+            self.height, self.pred_mask_scale, self.aspect_ratio, generator
+        )
+        context_size = sample_block_size(
+            self.height, self.enc_mask_scale, (1.0, 1.0), generator
+        )
+
+        # TODO: fix
+        for _ in range(B):
+            target_patches_indices = pick_target_patches(
+                self.height,
+                M=self.M,
+                scale=self.pred_mask_scale,
+                aspect_ratio=self.aspect_ratio,
+                block_size=target_size,
+            )
+            min_target_size = min(
+                min_target_size, min(len(mask) for mask in target_patches_indices)
+            )
+            collated_masks_target.append(target_patches_indices)
+
+            context_patches_indices = pick_context_patches(
+                self.height,
+                target_patches_indices,
+                scale=self.enc_mask_scale,
+                aspect_ratio=(1.0, 1.0),
+                min_keep=self.min_keep,
+                block_size=context_size,
+            )
+            min_context_size = min(min_context_size, len(context_patches_indices))
+            collated_masks_context.append([context_patches_indices])
+
+        collated_masks_target = [
+            [cm[:min_target_size] for cm in cm_list]
+            for cm_list in collated_masks_target
+        ]
+        collated_masks_target = torch.utils.data.default_collate(collated_masks_target)
+
+        collated_masks_context = [
+            [cm[:min_context_size] for cm in cm_list]
+            for cm_list in collated_masks_context
+        ]
+        collated_masks_context = torch.utils.data.default_collate(
+            collated_masks_context
+        )
+
+        return collated_batch, collated_masks_context, collated_masks_target
 
 
+def make_imagenet100(
+    transform,
+    batch_size,
+    collator=None,
+    pin_mem=True,
+    num_workers=8,
+    world_size=1,
+    rank=0,
+    root_path=None,
+    training=True,
+    drop_last=True,
+):
+    suffix = "train/" if training else "val/"
 
-class ImageNetSubset(object):
-    def __init__(self, dataset, subset_file):
-        """
-        ImageNetSubset
+    dataset = torchvision.datasets.ImageFolder(
+        root=os.path.join(root_path, suffix), transform=transform
+    )
+    logger.info("Initialized ImageNet on data-path {data_path}")
 
-        :param dataset: ImageNet dataset object
-        :param subset_file: '.txt' file containing IDs of IN1K images to keep
-        """
+    dist_sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset=dataset, num_replicas=world_size, rank=rank
+    )
 
-    def filter_dataset_(self, subset_file):
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        collate_fn=collator,
+        sampler=dist_sampler,
+        batch_size=batch_size,
+        drop_last=drop_last,
+        pin_memory=pin_mem,
+        num_workers=num_workers,
+        persistent_workers=False,
+    )
+
+    logger.info("ImageNet unsupervised data loader created")
+
+    return dataset, data_loader, dist_sampler
 
 
-    @property
-    def classes(self):
-
-    def __len__(self):
-
-    def __getitem__(self, index):
+def apply_masks(x, masks):
+    """
+    :param x: tensor of shape [B (batch-size), N (num-patches), D (feature-dim)]
+    :param masks: list of tensors containing indices of patches in [N] to keep
+    """
+    all_x = []
+    for m in masks:
+        mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
+        all_x += [torch.gather(x, dim=1, index=mask_keep)]
+    return torch.cat(all_x, dim=0)

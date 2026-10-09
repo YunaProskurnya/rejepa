@@ -10,7 +10,7 @@ class Attention(nn.Module):
         if embed_dim <= 0 or num_heads <= 0 or embed_dim % num_heads != 0:
             raise ValueError("embed_dim must be positive and divisible by positive num_heads")
 
-        self.num_heads = num_headsw
+        self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
 
