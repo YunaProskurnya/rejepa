@@ -9,6 +9,8 @@ import shutil
 import sys
 import time
 
+from comet_ml import start
+from comet_ml.integration.pytorch import log_model
 import numpy as np
 import PIL
 import torch
@@ -275,9 +277,6 @@ def main():
             parser.error("existing output directory belongs to an incompatible run")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
-    from comet_ml import start
-    from comet_ml.integration.pytorch import log_model
-
     experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
     experiment.log_parameters(config)
     if args.smoke_test:
