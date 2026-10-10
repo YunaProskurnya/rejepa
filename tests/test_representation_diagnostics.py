@@ -6,8 +6,10 @@ import sys
 import tempfile
 import unittest
 
+from PIL import Image
 import torch
 
+from src.models.encoder import VisionTransformer
 from src.representation_diagnostics import spectrum_statistics
 
 
@@ -26,36 +28,40 @@ class TestRepresentationDiagnostics(unittest.TestCase):
         self.assertEqual(collapsed["singular_entropy"], 0)
         self.assertEqual(collapsed["effective_rank"], 0)
 
-    def test_training_writes_baseline_and_updated_covariance(self):
+    def test_analyzes_finished_checkpoints_and_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "run"
-            result = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/train.py"), "--smoke-test",
-                 "--representation-every", "1", "--representation-samples", "4",
-                 "--max-steps", "1", "--output", str(output)],
-                cwd=ROOT, capture_output=True, text=True, timeout=90,
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            root = Path(temporary)
+            data = root / "val" / "class_a"
+            data.mkdir(parents=True)
+            for index, color in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255))):
+                Image.new("RGB", (40, 40), color).save(data / f"{index}.png")
+
+            run = root / "run"
+            run.mkdir()
+            options = dict(image_size=32, patch_size=8, in_channels=3, embed_dim=12,
+                           depth=1, num_heads=3)
+            encoder = VisionTransformer(**options)
+            for epoch in range(4):
+                torch.save(dict(config={"encoder": options}, target_encoder=encoder.state_dict(),
+                                step=(epoch + 1) * 10), run / f"checkpoint_{epoch}.pt")
+
+            command = [sys.executable, str(ROOT / "scripts/analyze_checkpoints.py"),
+                       "--checkpoints", str(run), "--data", str(data.parent),
+                       "--samples", "3", "--batch-size", "2", "--every", "2"]
+            for _ in range(2):
+                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            output = run / "representation_analysis"
             with (output / "representations.csv").open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual([int(row["step"]) for row in rows], [0, 1])
+            self.assertEqual([int(row["epoch"]) for row in rows], [0, 1, 3])
+            self.assertEqual([int(row["step"]) for row in rows], [10, 20, 40])
             for row in rows:
                 statistics = torch.load(output / row["artifact"], weights_only=True)
-                self.assertEqual(tuple(statistics["covariance"].shape), (48, 48))
-                self.assertEqual(statistics["images"], 4)
+                self.assertEqual(tuple(statistics["covariance"].shape), (12, 12))
+                self.assertEqual(statistics["images"], 3)
                 self.assertTrue(torch.isfinite(statistics["singular_values"]).all())
-
-            resumed = subprocess.run(
-                [sys.executable, str(ROOT / "scripts/train.py"), "--smoke-test",
-                 "--representation-every", "1", "--representation-samples", "4",
-                 "--max-steps", "2", "--output", str(output),
-                 "--resume", str(output / "checkpoint.pt")],
-                cwd=ROOT, capture_output=True, text=True, timeout=90,
-            )
-            self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
-            with (output / "representations.csv").open(newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            self.assertEqual([int(row["step"]) for row in rows], [0, 1, 2])
 
 
 if __name__ == "__main__":

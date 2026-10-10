@@ -1,19 +1,21 @@
 import argparse
-import copy
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import random
+import shutil
 import sys
 import time
 
+from comet_ml import start
+from comet_ml.integration.pytorch import log_model
 import numpy as np
 import PIL
 import torch
 import torchvision
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -26,7 +28,6 @@ from src.optimizer import create_optimizer
 from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
 from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
-from src.representation_diagnostics import evaluate_representation
 from src.train_step import train_step
 
 
@@ -66,9 +67,6 @@ def parse_args(argv=None):
     parser.add_argument("--final-weight-decay", type=float, default=0.4)
     parser.add_argument("--ema-start", type=float, default=0.996)
     parser.add_argument("--ema-end", type=float, default=1.0)
-    parser.add_argument("--representation-every", type=int, default=0)
-    parser.add_argument("--representation-samples", type=int, default=256)
-    parser.add_argument("--representation-batch-size", type=int, default=32)
     args = parse_config_args(parser, argv)
     if (args.data is not None) == args.smoke_test:
         parser.error("choose exactly one of --data or --smoke-test (in JSON or on the command line)")
@@ -88,8 +86,6 @@ def parse_args(argv=None):
         parser.error("warmup-epochs must be nonnegative and less than epochs")
     if not 0 <= args.ema_start <= args.ema_end <= 1:
         parser.error("EMA must satisfy 0 <= ema-start <= ema-end <= 1")
-    if args.representation_every < 0 or args.representation_samples < 2 or args.representation_batch_size < 1:
-        parser.error("representation-every must be nonnegative; samples >= 2 and batch-size >= 1")
     if any(not 0 <= value < float("inf") for value in (
         args.lr, args.start_lr, args.final_lr, args.weight_decay, args.final_weight_decay,
     )):
@@ -100,6 +96,9 @@ def parse_args(argv=None):
 
 def main():
     parser, args = parse_args()
+
+    if not os.environ.get("COMET_API_KEY"):
+        parser.error("COMET_API_KEY is required; source .env before running")
 
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
@@ -147,27 +146,6 @@ def main():
             dataset.targets = [label for _, label in dataset.samples]
             dataset.classes = selected_classes
             dataset.class_to_idx = {name: index for index, name in enumerate(selected_classes)}
-
-    representation_loader = None
-    if args.representation_every:
-        representation_dataset = copy.copy(dataset)
-        representation_dataset.transform = transforms.Compose([
-            transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(**normalize_options),
-        ])
-        sample_count = min(args.representation_samples, len(dataset))
-        if sample_count < 2:
-            parser.error("representation diagnostics require at least two images")
-        sample_indices = torch.randperm(
-            len(dataset), generator=torch.Generator().manual_seed(args.seed),
-        )[:sample_count].tolist()
-        representation_loader = DataLoader(
-            Subset(representation_dataset, sample_indices), batch_size=args.representation_batch_size,
-            shuffle=False, num_workers=0, pin_memory=device.type == "cuda",
-            generator=torch.Generator().manual_seed(args.seed),
-        )
 
     mask_options = dict(
         input_size=224, patch_size=16, enc_mask_scale=(0.85, 1.0),
@@ -224,15 +202,6 @@ def main():
                   batches_per_epoch=batches_per_epoch, updates_per_epoch=updates_per_epoch,
                   effective_batch_size=args.batch_size * args.accumulation_steps,
                   reference_commit="52c1ae95d05f743e000e8f10a1f3a79b10cff048")
-    if representation_loader is not None:
-        config["representation_indices"] = sample_indices
-        config["representation_method"] = dict(
-            model="target_encoder",
-            features="mean of full-image patch tokens after final encoder LayerNorm",
-            preprocessing="resize 256, center crop 224, ImageNet normalization",
-            covariance="centered sample covariance across fixed images",
-            singular_entropy="Shannon entropy of normalized singular values of centered features",
-        )
     # Record fixed settings as well as editable flags: checkpoints are self-describing.
     config.update(
         preprocessing=dict(
@@ -308,13 +277,15 @@ def main():
             parser.error("existing output directory belongs to an incompatible run")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
+    experiment.log_parameters(config)
     if args.smoke_test:
         print("Synthetic images: checks execution only, not representation quality.", flush=True)
     print(f"model={args.model} collator={args.collator} device={device} precision={args.precision} images={len(dataset)} "
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
-    def save_checkpoint():
+    def save_checkpoint(completed_epoch=None):
         numpy_state = np.random.get_state()
         temporary = args.output / "checkpoint.tmp"
         torch.save({
@@ -329,25 +300,9 @@ def main():
         }, temporary)
         temporary.replace(args.output / "checkpoint.pt")
 
-    def save_representation(epoch):
-        statistics = evaluate_representation(target_encoder, representation_loader, device, args.precision)
-        artifact = args.output / f"representation-step-{step:06d}.pt"
-        torch.save(statistics, artifact)
-        diagnostics_path = args.output / "representations.csv"
-        fields = ("step", "epoch", "images", "feature_dimension", "singular_entropy",
-                  "effective_rank", "mean_variance", "artifact")
-        with diagnostics_path.open("a", newline="", encoding="utf-8") as diagnostics:
-            writer = csv.DictWriter(diagnostics, fieldnames=fields)
-            if diagnostics.tell() == 0:
-                writer.writeheader()
-            writer.writerow({key: statistics[key] for key in fields if key in statistics} |
-                            {"step": step, "epoch": epoch, "artifact": artifact.name})
-        print(f"representation step={step} entropy={statistics['singular_entropy']:.4f} "
-              f"rank={statistics['effective_rank']:.2f} "
-              f"mean_variance={statistics['mean_variance']:.6g}", flush=True)
-
-    if representation_loader is not None and not (args.output / "representations.csv").exists():
-        save_representation(next_epoch + int(next_batch > 0))
+        if completed_epoch is not None:
+            shutil.copyfile(args.output / "checkpoint.pt", temporary)
+            temporary.replace(args.output / f"checkpoint_{completed_epoch}.pt")
 
     fieldnames = [
         "step", "epoch", "loss", "grad_norm", "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
@@ -448,8 +403,8 @@ def main():
                     row["target_tokens"] = int(row["target_tokens"])
                 writer.writerow(row)
                 log.flush()
-                if representation_loader is not None and step % args.representation_every == 0:
-                    save_representation(epoch + 1)
+                experiment.log_metrics({key: value for key, value in row.items() if value is not None},
+                                       step=step, epoch=epoch + 1)
                 print(f"step={step} epoch={epoch + 1} loss={row['loss']:.6f} "
                       f"context={row['context_tokens']:g} target={row['target_tokens']:g} "
                       f"lr={lr:.6g} ema={momentum:.6f} seconds={seconds:.3f} "
@@ -461,7 +416,7 @@ def main():
                     stop = True
                     stop_reason = "max-steps reached"
                     break
-            save_checkpoint()
+            save_checkpoint(completed_epoch=epoch if next_epoch == epoch + 1 and next_batch == 0 else None)
             del iterator
         if session_updates == 0:
             save_checkpoint()
@@ -470,6 +425,9 @@ def main():
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
+    log_model(experiment, {"encoder": encoder.state_dict(), "predictor": predictor.state_dict(),
+                           "target_encoder": target_encoder.state_dict()}, model_name="rejepa")
+    experiment.end()
 
 
 if __name__ == "__main__":
