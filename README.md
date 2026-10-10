@@ -1,205 +1,238 @@
 # rejepa
 
-Воспроизведение I-JEPA на PyTorch: наши encoder/predictor, Smooth L1, AdamW и EMA.
-Поддерживается обучение на одном устройстве (CPU или GPU).
+Воспроизведение I-JEPA на PyTorch. Обучение на одном CPU или GPU, ImageNet100,
+мониторинг представлений и отдельная итоговая оценка.
 
-## Установка и проверка запуска
+[Данные](#imagenet100) · [Обучение](#обучение) · [Comet](#логирование-в-comet) ·
+[Оценка](#оценка-представлений) · [Продолжение запуска](#результаты-и-продолжение) · [Код](#структура-проекта)
 
-Команды выполняются из корня репозитория в активированном Python-окружении.
-Для GPU используйте окружение кластера с PyTorch/CUDA либо установите совместимые
-`torch` и `torchvision` по [инструкции PyTorch](https://pytorch.org/get-started/locally/),
-затем остальные зависимости:
+## Установка
+
+Все команды выполняются **из корня репозитория** в активированном Python-окружении.
+Многострочные примеры используют синтаксис Bash.
+Для GPU нужны совместимые `torch` и `torchvision` с CUDA — используйте окружение
+кластера или [инструкцию PyTorch](https://pytorch.org/get-started/locally/).
 
 ```sh
 python -m pip install -r requirements.txt
 python scripts/train.py --config configs/smoke.json
 ```
 
-Данная проверка использует 8 синтетических изображений и компактную модель на CPU,
-ничего не скачивает и сохраняет конфигурацию, метрики и checkpoint.
-Каждому новому запуску нужна отдельная папка `--output`.
+Проверка `smoke` использует 8 синтетических изображений и маленькую модель на CPU;
+данные не скачиваются, Comet выключен.
 
 ## ImageNet100
 
-Команды находятся в `scripts/setup_imagenet100.sh`; вместо блока выше
-можно выполнить `bash -e ../../scripts/setup_imagenet100.sh` из папки `data/imagenet100`.
-После подготовки получатся `data/imagenet100/train/<класс>/` и
-`data/imagenet100/val/<класс>/`. Конфиг обучения уже использует этот путь.
+```sh
+bash scripts/setup_imagenet100.sh
+```
 
-По умолчанию используется ImageFolder: `root/class_name/image.jpg`.
-Для обучения передавайте корень train; метки классов I-JEPA не использует.
-Для оценки нужны отдельные train и val с одинаковыми названиями папок классов.
-Список классов сохраняется в конфигурации запуска. Данные автоматически не скачиваются.
+Скрипт скачивает датасет и раскладывает его в папки, уже указанные в конфигах:
 
-Содержимое `data/`, кроме [инструкции](data/README.md), исключено из Git.
-Если датасет уже есть на сервере,
-укажите его путь в `data` конфига или через `--data`; копировать его в проект не нужно.
+```text
+data/imagenet100/
+├── train/<класс>/<изображение>
+└── val/<класс>/<изображение>
+```
 
-## Первый запуск на GPU
+В train и val должны совпадать названия классов. Если данные уже есть на сервере,
+укажите оба пути в `data` / `val_data` конфига. Датасеты исключены из Git.
+Подробнее — в [инструкции по данным](data/README.md).
 
-Запускайте внутри выделенной GPU-задачи или контейнера кластера, где доступна
-одна H200. Скрипт использует одно устройство, запускайте обычным `python`.
-Проверка окружения и запуск на 10 эпох:
+## Обучение
+
+GPU-конфиги используют **ViT-B/16, BF16, наш collator**, лёгкий probe после каждой
+эпохи и Comet. Для Comet задайте `COMET_API_KEY` в окружении задачи кластера,
+для запуска без него добавьте `--no-comet`.
+
+| Запуск | Конфиг | Эпохи / warmup | Батч × накопление |
+| --- | --- | --- | --- |
+| Проверка обучения | [imagenet100_vit_base.json](configs/imagenet100_vit_base.json) | 10 / 1 | 128 × 1 |
+| Длительный, батч 128 | [imagenet100_vit_base_600ep.json](configs/imagenet100_vit_base_600ep.json) | 600 / 1 | 128 × 1 |
+| Длительный эксперимент | [imagenet100_vit_base_600ep_batch2048.json](configs/imagenet100_vit_base_600ep_batch2048.json) | 600 / 15 | 128 × 16 = 2048 |
+
+**Сначала — 10 полных эпох:**
 
 ```sh
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.cuda.get_device_name()); print('BF16:', torch.cuda.is_bf16_supported())"
+
 python scripts/train.py --config configs/imagenet100_vit_base.json
 ```
 
-Базовый конфиг: ViT-B/16, BF16, batch size 128 без накопления градиентов,
-наш collator и **10 полных эпох**, без ограничения числа шагов.
-Одна эпоха отведена под warmup. Learning rate растёт от `6.25e-6` до `6.25e-5`,
-затем снижается по косинусу до `6.25e-8`. Эти три значения взяты из
-[статьи I-JEPA, приложение A.1](https://arxiv.org/pdf/2301.08243)
-и умножены на `128 / 2048` для меньшего батча. Такое масштабирование — наш
-стартовый выбор для короткого запуска; его качество ещё предстоит проверить.
-Цель запуска — проверить стабильность обучения на ImageNet100 и затем оценить
-качество представлений через kNN.
-
-При успешном завершении в `runs/imagenet100-vit-base-10ep/` появятся `config.json`,
-`metrics.csv` и `checkpoint.pt`. В метриках смотрите `loss`, `grad_norm`,
-`steady_images_per_second` и `cuda_peak_memory_mb`.
-Для другого запуска задайте новый `output`, при нехватке памяти уменьшите batch size.
-
-## Конфиги экспериментов
-
-В `configs/` лежат планы запусков: плоские JSON с именами параметров в `snake_case`
-(`batch_size`, `warmup_epochs`, `max_steps`). Параметры командной строки
-переопределяют JSON; пропущенные настройки берутся из значений по умолчанию.
-Относительные пути считаются от текущей рабочей папки.
-Все команды здесь нужно выполнять из корня репозитория.
-
-Основной конфиг — `configs/imagenet100_vit_base.json`. При необходимости измените
-в нём `data` на путь к train и `output` на отдельную папку результатов.
-`configs/smoke.json` оставлен только для быстрой проверки на CPU.
-В основном конфиге `max_steps: null` позволяет пройти все заданные эпохи.
-Ограничение `max_steps` относится к суммарному числу шагов оптимизатора;
-длительность расписаний по-прежнему определяется `epochs`.
-
-Разовое изменение удобно передать через CLI:
+**Для длительного запуска:**
 
 ```sh
-python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 32 --accumulation-steps 4 --output runs/imagenet100-vit-base-10ep-small-batch
+python scripts/train.py --config configs/imagenet100_vit_base_600ep_batch2048.json
 ```
 
-Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
-Маски генерируются заново для каждого батча.
+Результаты сохраняются в `runs/imagenet100-vit-base-10ep/` и
+`runs/imagenet100-vit-base-600ep-batch2048/` соответственно. Ограничения числа шагов нет.
+Итоговая оценка запускается отдельно.
 
-По умолчанию используется collator команды: `--collator custom`, реализация
-в `src/datasets/imagenet100.py`. Авторский вариант включается через
-`--collator reference`. Оба возвращают одинаковый формат батча, поэтому encoder,
-predictor и training step не меняются. Для проверки авторского варианта:
+Настройки варианта `batch2048` опираются на [статью, A.1](https://arxiv.org/html/2301.08243v3#A1.SS1):
+LR `1e-4 → 1e-3 → 1e-6`; для короткого запуска эти значения умножены на `128 / 2048`.
+Вариант на 600 эпох с батчем 128 сохраняет LR и warmup короткого запуска,
+использует `runs/imagenet100-vit-base-600ep/` и запускается с соответствующим `--config`.
+Weight decay меняется по косинусу, как в авторском коде. Наш датасет — ImageNet100,
+в статье — ImageNet-1K. Накопление не полностью эквивалентно большому батчу:
+маски согласуются внутри микробатчей, а последняя группа эпохи может быть меньше.
+
+### Как изменить запуск
+
+Скопируйте JSON из `configs/`, измените настройки и задайте новый `output`.
+Параметры командной строки переопределяют JSON, относительные пути считаются от корня проекта при запуске команд отсюда. Например, при нехватке памяти можно уменьшить batch_size:
 
 ```sh
-python scripts/train.py --config configs/smoke.json --collator reference --output runs/reference-smoke
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --batch-size 32 --accumulation-steps 4 \
+  --output runs/imagenet100-small-batch
 ```
 
-Оба варианта повторяют правило reference: после 20 неудачных попыток получить
-достаточно большой контекст часть ограничений на пересечение с targets
-постепенно снимается. При текущих настройках маски обоих collator проверены на
-совпадение.
+Доступны модели `tiny`, `vit_base`, `vit_large`, режимы `fp32` / `bf16` и collator
+`custom` / `reference`. Полный список параметров: `python scripts/train.py --help`.
+`max_steps` ограничивает шаги оптимизатора, длительность расписаний задаётся `epochs`.
 
-Основные параметры:
+## Логирование в Comet
 
-| Параметр | Назначение |
-| --- | --- |
-| `--model tiny / vit_base / vit_large` | По умолчанию `tiny` для проверки. `vit_base` — ViT-B/16: encoder 768×12 блоков, predictor 384×6 блоков. |
-| `--device cpu / cuda` | По умолчанию CPU. |
-| `--batch-size`, `--accumulation-steps` | Эффективный batch size — их произведение; optimizer, EMA и расписания обновляются после накопления. |
-| `--precision fp32 / bf16` | По умолчанию FP32; BF16 уменьшает затраты памяти на поддерживаемом оборудовании. |
-| `--epochs`, `--warmup-epochs` | По умолчанию 1 и 0; warmup должен быть короче обучения. |
-| `--lr`, `--weight-decay`, `--ema-start` | Пиковый LR, начальные weight decay и EMA; остальные параметры расписаний доступны в `--help`. |
-| `--num-workers`, `--seed` | Загрузка данных и воспроизводимость; по умолчанию 0 и 0. |
+[Открыть графики команды](https://www.comet.com/superustam/rejepa/view/new/panels)
+— workspace `superustam`, project `rejepa`.
 
-При нехватке памяти уменьшайте batch size, при необходимости компенсируйте его
-накоплением градиентов. Маски согласуются внутри каждого микробатча, поэтому
-накопление не полностью эквивалентно одному большому батчу.
+Ключ берётся только из `COMET_API_KEY`: получите его в
+[настройках Comet](https://www.comet.com/docs/v2/guides/experiment-management/configure-sdk/) и задайте через секреты задачи кластера. В конфиги и checkpoint ключ не записывается.
+Проект можно изменить через `--comet-workspace` / `--comet-project`.
 
-## Результаты и продолжение
+| Что наблюдать | Метрики | Ось графика |
+| --- | --- | --- |
+| Обучение | `train/loss`, `train/grad_norm`, `train/lr`, скорость и память | Step |
+| Качество представлений | `linear_probe/train_top1`, `linear_probe/val_top1`, соответствующие `train_loss` / `val_loss` | Epoch |
+| Время | `linear_probe/probe_seconds`, `runtime/session_seconds` | Epoch |
 
-В папке `--output` сохраняются:
-
-- `config.json` — полная фактическая конфигурация запуска после объединения JSON и CLI;
-- `metrics.csv` — loss, градиенты, расписания, скорость и память GPU;
-- `checkpoint.pt` — модели, оптимизатор, расписания, генераторы случайных чисел и прогресс.
-
-В `config.json` и `checkpoint["config"]` сохраняются одинаковые параметры:
-итоговые аргументы, модели со значениями по умолчанию, маски, preprocessing,
-objective, optimizer, schedules, версии библиотек и список классов.
-Пути `data`, `output`, `resume` и `config` записываются абсолютными, если заданы;
-поле `config` указывает исходный файл эксперимента.
-Этот snapshot содержит вычисленные значения и служебные сведения, поэтому
-`runs/.../config.json` не является входным файлом для `--config`.
-Для новых запусков редактируйте файлы в `configs/`.
-
-Checkpoint обновляется каждые `--checkpoint-every` шагов оптимизатора (по умолчанию
-100), в конце эпохи и при штатной остановке. Для продолжения повторите исходную
-команду с тем же `--output` и добавьте `--resume path/to/checkpoint.pt`.
-Параметры данных и обучения, включая collator, общее число эпох, batch size и накопление,
-должны совпадать. Если предел шагов достигнут, увеличьте `--max-steps`
-или установите `"max_steps": null` в исходном JSON.
-Если после проверки меняете общее число эпох, начните новый запуск с отдельным
-`output`: продолжать старый checkpoint с другим расписанием нельзя.
-При нескольких DataLoader workers точное повторение будущих crop и масок после
-перезапуска не гарантируется из-за предварительной загрузки.
+Top-1 измеряется в процентах. Конфиг и CSV также отправляются как файлы результатов,
+локальные результаты сохраняются и с `--no-comet`. При переносе запуска сохраните
+`comet.json`: он связывает `--resume` с прежним облачным экспериментом.
+Метрики ковариации будут подключены отдельно, после их реализации.
 
 ## Оценка представлений
 
-kNN проверяет, насколько хорошо классы разделяются в признаках замороженного
-**target encoder**. Его patch tokens усредняются в один вектор изображения и
-нормализуются. Для каждого изображения из val ищутся ближайшие по косинусной
-близости изображения из train; их метки голосуют за класс, с большим весом у
-более близких соседей. Отдельный классификатор не обучается.
+В обоих режимах encoder заморожен: используется EMA target, а при его отсутствии — context.
+Линейная голова обучается на train. train и val оцениваются отдельно.
+
+| | Мониторинг по эпохам | Итоговый linear probe |
+| --- | --- | --- |
+| Когда | Автоматически после полной эпохи I-JEPA | Отдельной командой после предобучения |
+| Признаки | Средние patch-токены последнего слоя, один проход train/val, кэш в RAM | Последний слой или конкатенация последних четырёх, новые crop и flip каждую эпоху |
+| Голова | Новая Linear, Adam, 30 эпох, batch 256, LR 0.001 | LARS, 50 эпох, эффективный batch 16384, с BatchNorm и без |
+| Результат | `linear_probe.csv`, графики `linear_probe/*` | JSON со всеми вариантами и лучшим по val, графики `linear_final/*` |
+
+Мониторинг использует Resize(256) → CenterCrop(224), не меняет encoder и состояние
+генераторов обучения. Кэш train-признаков ViT-B занимает около 400 МБ для 130 тысяч
+изображений. Отключение: `--no-linear-probe`. Оценка `eta_seconds` не включает будущие probe.
+
+**Итоговая оценка checkpoint:**
 
 ```sh
-python scripts/evaluate_knn.py --checkpoint runs/imagenet100-vit-base-10ep/checkpoint.pt --train data/imagenet100/train --val data/imagenet100/val --device cuda --bf16 --compare-random --output runs/imagenet100-vit-base-10ep/knn.json
+python scripts/evaluate_linear.py --mode final \
+  --checkpoint runs/imagenet100-vit-base-10ep/checkpoint.pt \
+  --train data/imagenet100/train --val data/imagenet100/val \
+  --output runs/imagenet100-vit-base-10ep/linear_final.json \
+  --device cuda --precision bf16 --batch-size 128 --num-workers 4 --comet
 ```
 
-По умолчанию оценка идёт на CPU, с 20 соседями, 20 reference-изображениями из train
-и 5 запросами из val на класс. Числа меняются через `--k`, `--reference-per-class`
-и `--queries-per-class`; в каждом классе должно хватать изображений. Для GPU
-добавьте `--device cuda`, при поддержке BF16 — `--bf16`.
+Для другого запуска замените пути к checkpoint и результату. `--batch-size` задаёт
+порцию изображений для encoder, `--probe-batch-size` — батч головы.
+По [статье, A.2](https://arxiv.org/html/2301.08243v3#A1.SS2) перебираются reference LR
+`{0.01, 0.05, 0.001}` и weight decay `{0.0005, 0}`, LR делится на 10 каждые 15 эпох.
+С учётом признаков и BatchNorm получается 24 варианта (12 для `tiny`). Эта оценка
+существенно дороже мониторинга, протокол и допущения записываются в JSON.
+Если train меньше 16384 изображений, уменьшите `--probe-batch-size`.
+Comet использует прежний эксперимент, если рядом с итоговым JSON есть `comet.json`.
 
-`--compare-random` повторяет оценку той же архитектуры со случайной инициализацией
-на тех же изображениях. Это проверяет прирост от обучения. Случайный encoder не
-обязан давать точность случайного угадывания: он тоже может сохранять сходство
-изображений. Метки используются только при оценке, не при обучении I-JEPA.
+<details>
+<summary>Дополнительно: лёгкий probe для checkpoint и kNN</summary>
 
-JSON содержит top-1/top-5 accuracy, прирост top-1 в процентных пунктах, разброс
-признаков, эффективный ранг и списки изображений. При сравнении экспериментов
-сохраняйте одинаковые данные и параметры оценки. kNN не заменяет linear probe
-из статьи.
+Лёгкий probe отдельно от обучения, с теми же настройками, что у мониторинга:
 
-## Где читать и менять код
+```sh
+python scripts/evaluate_linear.py --mode monitor \
+  --checkpoint runs/imagenet100-vit-base-10ep/checkpoint.pt \
+  --train data/imagenet100/train --val data/imagenet100/val \
+  --output runs/imagenet100-vit-base-10ep/linear_monitor.json \
+  --device cuda --precision bf16 --batch-size 128 --num-workers 4
+```
 
-`src/` содержит метод, `scripts/` — рабочие запуски обучения и оценки,
-`configs/` — планы экспериментов, `example/` — учебные примеры,
-`data/` — локальные датасеты, `runs/` — локальные результаты.
+kNN классифицирует val по ближайшим train-признакам без обучения головы.
+`--compare-random` сравнивает результат со случайно инициализированным encoder:
 
-- `src/models/` — encoder, predictor и функции target encoder/EMA.
-- `src/train_step.py` — один шаг: цели → предсказания → loss → backward → optimizer → EMA.
-- `src/optimizer.py` и `src/losses.py` — группы параметров AdamW и функция потерь.
-- `scripts/train.py` — параметры, DataLoader, цикл, расписания и сохранение.
-- `scripts/evaluate_knn.py` — оценка сохранённой модели.
-- `scripts/setup_imagenet100.sh` — команды команды для скачивания и раскладки ImageNet100.
-- `src/config.py` — чтение JSON и проверка настроек запуска.
-- `src/reference/` — авторские collator и расписания LR/weight decay.
-- `src/datasets/imagenet100.py` — collator команды и общая сборка DataLoader;
-  `make_imagenet100` читает `root/train` или `root/val` и возвращает dataset, loader, sampler.
-  При его отдельном использовании в обучении вызывайте `sampler.set_epoch(epoch)` перед каждой эпохой.
+```sh
+python scripts/evaluate_knn.py \
+  --checkpoint runs/imagenet100-vit-base-10ep/checkpoint.pt \
+  --train data/imagenet100/train --val data/imagenet100/val \
+  --output runs/imagenet100-vit-base-10ep/knn.json \
+  --device cuda --bf16 --compare-random
+```
 
-Файлы `reference` взяты без изменений из
-[facebookresearch/ijepa, commit 52c1ae95](https://github.com/facebookresearch/ijepa/tree/52c1ae95d05f743e000e8f10a1f3a79b10cff048).
-Источник и лицензия CC BY-NC 4.0 находятся рядом. Реализация команды перенесена
-из ветки `data_encoder` (commit `930120e`) с адаптацией интерфейсов.
-Оба collator сохраняют контракт батча:
-`((images, labels), [context_indices], [target_indices_1, ...])`.
-Индексы относятся к сетке патчей после crop/resize; каждый набор имеет форму `[B, K]`.
+По умолчанию: 20 соседей, 20 train- и 5 val-изображений на класс. Меняются через
+`--k`, `--reference-per-class`, `--queries-per-class`. Сравнивайте одинаковые данные
+и настройки; kNN не заменяет итоговый linear probe.
 
-Полный список параметров и проверки:
+</details>
+
+## Результаты и продолжение
+
+В папке `output` каждого запуска:
+
+| Файл | Содержимое |
+| --- | --- |
+| `config.json` | Фактическая конфигурация, версии библиотек, классы и протокол оценки |
+| `metrics.csv` | Loss, градиенты, расписания, скорость и память |
+| `linear_probe.csv` | Train/val-метрики после эпох |
+| `checkpoint.pt` | Модели, оптимизатор, расписания, RNG, прогресс и конфигурация |
+| `checkpoint_epoch_0010.pt`, `…0020.pt`, … | Отдельные полные checkpoint после каждых 10 завершённых эпох |
+| `comet.json` | Идентификатор облачного эксперимента |
+
+`runs/.../config.json` — отчёт о запуске, не входной файл для `--config`.
+Новые эксперименты настраивайте через `configs/` и сохраняйте в отдельные папки.
+Checkpoint обновляется каждые 100 шагов по умолчанию, в конце эпохи и при штатной остановке.
+Дополнительные копии сохраняются каждые 10 эпох, до запуска probe.
+Период задаётся `checkpoint_every_epochs` в JSON или `--checkpoint-every-epochs`;
+`0010` означает 10 полностью завершённых эпох. При остановке посреди эпохи её копия не создаётся.
+
+Для продолжения повторите исходную команду, добавив `--resume`:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --resume runs/imagenet100-vit-base-10ep/checkpoint.pt
+```
+
+Сохраните прежние `output`, данные и параметры обучения, включая число эпох и батч.
+Для продолжения с сохранённой эпохи укажите её файл вместо `checkpoint.pt`.
+Для отдельной траектории от старого checkpoint задайте новый `--output`.
+Переход с 10 на 600 эпох требует нового запуска. При нескольких DataLoader workers
+точное повторение crop и масок после перезапуска не гарантируется из-за предзагрузки.
+
+## Структура проекта
+
+| Где | Что находится |
+| --- | --- |
+| `configs/` | JSON-конфиги экспериментов |
+| `scripts/` | Команды подготовки данных, обучения и оценки checkpoint |
+| `src/models/` | Encoder, predictor, target encoder и EMA |
+| `src/train_step.py`, `src/optimizer.py`, `src/losses.py` | Шаг обучения, AdamW и loss |
+| `src/linear_probe.py`, `src/linear_probe_final.py` | Реализации лёгкой и итоговой оценки; CLI — `scripts/evaluate_linear.py` |
+| `src/datasets/`, `src/reference/` | Collator команды и авторские компоненты |
+| `src/config.py`, `src/tracking.py` | Чтение настроек и Comet |
+| `example/`, `tests/` | Учебные примеры и проверки |
+| `data/`, `runs/` | Локальные датасеты и результаты, исключённые из Git |
+
+Оба collator имеют общий контракт:
+`((images, labels), [context_indices], [target_indices_1, ...])`, индексы — `[B, K]`
+на сетке после crop/resize. Авторский вариант выбирается через `--collator reference`.
+Источники I-JEPA/MAE, закреплённые версии и лицензия — в [src/reference/](src/reference/).
+Лёгкий probe основан на функции из ветки `reg`, commit `cd0da4e`.
 
 ```sh
 python scripts/train.py --help
+python scripts/evaluate_linear.py --help
 python scripts/evaluate_knn.py --help
 python -m unittest discover -s tests
 ```

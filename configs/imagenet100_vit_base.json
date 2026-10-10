@@ -1,6 +1,14 @@
 {
-  "data": "train",
+  "data": "data/imagenet100/train",
   "dataset": "imagefolder",
+  "comet": true,
+  "comet_workspace": "superustam",
+  "comet_project": "rejepa",
+  "linear_probe": true,
+  "val_data": "data/imagenet100/val",
+  "probe_epochs": 30,
+  "probe_batch_size": 256,
+  "probe_lr": 0.001,
   "output": "runs/imagenet100-vit-base-10ep",
   "collator": "custom",
   "model": "vit_base",
@@ -20,5 +28,6 @@
   "num_workers": 4,
   "seed": 0,
   "max_steps": null,
-  "checkpoint_every": 100
+  "checkpoint_every": 100,
+  "checkpoint_every_epochs": 10
 }

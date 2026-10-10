@@ -9,3 +9,13 @@ LICENSE: LICENSE (CC BY-NC 4.0)
 
 The LICENSE in this directory applies to these upstream files.
 This directory is a small reference-code subtree, not our model implementation.
+
+lars.py is unmodified code from https://github.com/facebookresearch/mae
+Commit: efb2a8062c206524e35e47d04501ed4f544c0ae8
+Upstream path: util/lars.py
+Source: https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/lars.py
+Upstream license: https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/LICENSE
+MAE uses the same CC BY-NC 4.0 license text (whitespace differences only).
+The LICENSE in this directory also applies to lars.py.
+This is the optimizer implementation cited via MAE, not released I-JEPA
+linear-evaluation code; I-JEPA does not publish those evaluation internals.

@@ -5,3 +5,4 @@ numpy
 Pillow
 
 kaggle
+comet_ml>=3.49

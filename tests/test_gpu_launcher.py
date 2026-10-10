@@ -27,6 +27,54 @@ class TestGPULauncher(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
+    def test_periodic_epoch_checkpoints_are_complete_and_restartable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            # Four microbatches become two optimizer updates per epoch (3 + 1).
+            arguments = ["--smoke-test", "--epochs", "21", "--accumulation-steps", "3",
+                         "--output", output]
+            self.launch(*arguments, "--max-steps", "19")
+            partial = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual((partial["next_epoch"], partial["next_batch"]), (9, 3))
+            self.assertEqual(partial["config"]["checkpoint_every_epochs"], 10)
+            self.assertEqual(list(output.glob("checkpoint_epoch_*.pt")), [])
+
+            self.launch(*arguments, "--max-steps", "20", "--resume", output / "checkpoint.pt")
+            tenth = output / "checkpoint_epoch_0010.pt"
+            tenth_bytes = tenth.read_bytes()
+            self.assertEqual(tenth_bytes, (output / "checkpoint.pt").read_bytes())
+            saved = torch.load(tenth, weights_only=True)
+            self.assertEqual((saved["step"], saved["epoch"], saved["next_epoch"], saved["next_batch"]),
+                             (20, 10, 10, 0))
+
+            self.launch(*arguments, "--max-steps", "40", "--resume", tenth)
+            twentieth = output / "checkpoint_epoch_0020.pt"
+            twentieth_bytes = twentieth.read_bytes()
+            self.assertEqual(twentieth_bytes, (output / "checkpoint.pt").read_bytes())
+            self.assertEqual(tenth.read_bytes(), tenth_bytes)
+
+            self.launch(*arguments, "--resume", twentieth)
+            latest = torch.load(output / "checkpoint.pt", weights_only=True)
+            self.assertEqual((latest["step"], latest["next_epoch"], latest["next_batch"]), (42, 21, 0))
+            self.assertEqual(latest["lr_schedule_step"], 42)
+            self.assertEqual(latest["wd_schedule_step"], 42)
+            self.assertEqual(tenth.read_bytes(), tenth_bytes)
+            self.assertEqual(twentieth.read_bytes(), twentieth_bytes)
+            self.assertEqual(sorted(path.name for path in output.glob("checkpoint_epoch_*.pt")),
+                             ["checkpoint_epoch_0010.pt", "checkpoint_epoch_0020.pt"])
+            self.assertEqual(list(output.glob("*.tmp")), [])
+
+    def test_epoch_checkpoint_interval_validation(self):
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from scripts.train import parse_args
+
+        _, options = parse_args(["--smoke-test", "--checkpoint-every-epochs", "5"])
+        self.assertEqual(options.checkpoint_every_epochs, 5)
+        for interval in ("0", "-1"):
+            with self.subTest(interval=interval), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                parse_args(["--smoke-test", "--checkpoint-every-epochs", interval])
+
     def test_accumulation_resume_matches_uninterrupted_cpu_run(self):
         for collator in ("reference", "custom"):
             with self.subTest(collator=collator):

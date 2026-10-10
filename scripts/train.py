@@ -1,9 +1,11 @@
 import argparse
+from contextlib import ExitStack
 import csv
 import json
 import math
 from pathlib import Path
 import random
+import shutil
 import sys
 import time
 
@@ -20,11 +22,13 @@ from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
 from src.models.target_encoder import create_target_encoder
 from src.config import parse_config_args
+from src.linear_probe import evaluate_linear_probe, make_probe_loaders
 from src.optimizer import create_optimizer
 from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
 from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
 from src.train_step import train_step
+from src.tracking import start_tracker
 
 
 def seed_worker(worker_id):
@@ -50,6 +54,8 @@ def parse_args(argv=None):
     parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--accumulation-steps", type=int, default=1)
     parser.add_argument("--checkpoint-every", type=int, default=100)
+    parser.add_argument("--checkpoint-every-epochs", type=int, default=10,
+                        help="retain an additional checkpoint every N completed epochs")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--max-seconds", type=float)
     parser.add_argument("--benchmark-warmup", type=int, default=5)
@@ -63,6 +69,16 @@ def parse_args(argv=None):
     parser.add_argument("--final-weight-decay", type=float, default=0.4)
     parser.add_argument("--ema-start", type=float, default=0.996)
     parser.add_argument("--ema-end", type=float, default=1.0)
+    parser.add_argument("--linear-probe", action=argparse.BooleanOptionalAction, default=False,
+                        help="lightweight epoch monitoring: cached features and a fresh Adam head")
+    parser.add_argument("--val-data", type=Path, help="ImageFolder val for epoch-end linear probe")
+    parser.add_argument("--probe-epochs", type=int, default=30, help="head training epochs per evaluation")
+    parser.add_argument("--probe-batch-size", type=int, default=256, help="batch size for cached features")
+    parser.add_argument("--probe-lr", type=float, default=1e-3)
+    parser.add_argument("--comet", action=argparse.BooleanOptionalAction, default=False,
+                        help="send metrics to Comet; requires COMET_API_KEY")
+    parser.add_argument("--comet-workspace", default="superustam")
+    parser.add_argument("--comet-project", default="rejepa")
     args = parse_config_args(parser, argv)
     if (args.data is not None) == args.smoke_test:
         parser.error("choose exactly one of --data or --smoke-test (in JSON or on the command line)")
@@ -72,6 +88,8 @@ def parse_args(argv=None):
         parser.error("max-steps must be positive")
     if args.accumulation_steps <= 0 or args.checkpoint_every <= 0 or args.benchmark_warmup < 0:
         parser.error("accumulation-steps/checkpoint-every must be positive; benchmark-warmup nonnegative")
+    if args.checkpoint_every_epochs <= 0:
+        parser.error("checkpoint-every-epochs must be positive")
     if args.max_seconds is not None and not 0 < args.max_seconds < float("inf"):
         parser.error("max-seconds must be finite and positive")
     if args.class_subset_count is not None and (
@@ -82,6 +100,10 @@ def parse_args(argv=None):
         parser.error("warmup-epochs must be nonnegative and less than epochs")
     if not 0 <= args.ema_start <= args.ema_end <= 1:
         parser.error("EMA must satisfy 0 <= ema-start <= ema-end <= 1")
+    if args.linear_probe and (args.val_data is None or args.smoke_test or args.dataset != "imagefolder"):
+        parser.error("--linear-probe requires ImageFolder --data and a separate --val-data")
+    if args.probe_epochs <= 0 or args.probe_batch_size <= 0 or not 0 < args.probe_lr < float("inf"):
+        parser.error("probe-epochs, probe-batch-size and probe-lr must be positive and finite")
     if any(not 0 <= value < float("inf") for value in (
         args.lr, args.start_lr, args.final_lr, args.weight_decay, args.final_weight_decay,
     )):
@@ -90,7 +112,7 @@ def parse_args(argv=None):
     return parser, args
 
 
-def main():
+def run_training(resources):
     parser, args = parse_args()
 
     random.seed(args.seed)
@@ -139,6 +161,17 @@ def main():
             dataset.targets = [label for _, label in dataset.samples]
             dataset.classes = selected_classes
             dataset.class_to_idx = {name: index for index, name in enumerate(selected_classes)}
+
+    probe_loaders = None
+    if args.linear_probe:
+        try:
+            probe_loaders = make_probe_loaders(
+                args.data, args.val_data, class_names=selected_classes,
+                batch_size=args.batch_size, num_workers=args.num_workers, seed=args.seed,
+                pin_memory=device.type == "cuda",
+            )
+        except (ValueError, FileNotFoundError) as error:
+            parser.error(str(error))
 
     mask_options = dict(
         input_size=224, patch_size=16, enc_mask_scale=(0.85, 1.0),
@@ -195,7 +228,6 @@ def main():
                   batches_per_epoch=batches_per_epoch, updates_per_epoch=updates_per_epoch,
                   effective_batch_size=args.batch_size * args.accumulation_steps,
                   reference_commit="52c1ae95d05f743e000e8f10a1f3a79b10cff048")
-    # Record fixed settings as well as editable flags: checkpoints are self-describing.
     config.update(
         preprocessing=dict(
             random_resized_crop={**crop_options, "interpolation": crop_options["interpolation"].value},
@@ -218,7 +250,22 @@ def main():
         versions=dict(python=sys.version.split()[0], torchvision=str(torchvision.__version__),
                       numpy=np.__version__, pillow=PIL.__version__),
     )
-    for key in ("data", "output", "resume", "config"):
+    config["linear_probe_protocol"] = dict(
+        mode="monitor",
+        encoder="target_encoder" if target_encoder is not None else "encoder",
+        train=str(args.data.resolve()), val=str(args.val_data.resolve()),
+        train_images=len(probe_loaders[0].dataset), val_images=len(probe_loaders[1].dataset),
+        class_to_idx=probe_loaders[0].dataset.class_to_idx,
+        resize=256, center_crop=224, interpolation="bilinear", antialias=True,
+        normalize=normalize_options, pooling="mean of final patch tokens; no extra normalization",
+        cache="CPU float32; recomputed for every encoder checkpoint",
+        head="fresh Linear(D, classes) with bias each evaluation",
+        optimizer="Adam", betas=[0.9, 0.999], eps=1e-8, weight_decay=0,
+        epochs=args.probe_epochs, batch_size=args.probe_batch_size, lr=args.probe_lr,
+        seed=args.seed, feature_precision=args.precision, head_precision="fp32",
+        frequency="after every complete pretraining epoch", accuracy_unit="percent",
+    ) if args.linear_probe else None
+    for key in ("data", "val_data", "output", "resume", "config"):
         value = getattr(args, key)
         if value is not None:
             config[key] = str(value.resolve())
@@ -228,8 +275,15 @@ def main():
     next_epoch = 0
     next_batch = 0
     microbatches_seen = 0
+
+    def probe_protocol_changed(saved):
+        previous = saved.get("linear_probe_protocol")
+        return args.linear_probe and previous is not None and previous != config["linear_probe_protocol"]
+
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=True)
+        if not args.linear_probe:
+            config["linear_probe_protocol"] = checkpoint["config"].get("linear_probe_protocol")
         compatible = (
             "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test", "collator",
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
@@ -238,6 +292,8 @@ def main():
             "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
         differences = [key for key in compatible if checkpoint["config"].get(key) != config.get(key)]
+        if probe_protocol_changed(checkpoint["config"]):
+            differences.append("linear_probe_protocol")
         if differences:
             parser.error("resume configuration differs: " + ", ".join(differences))
         if "next_batch" not in checkpoint:
@@ -266,8 +322,23 @@ def main():
         parser.error("output already exists; choose a new directory or pass --resume")
     if args.output.exists() and args.resume and (args.output / "config.json").exists():
         previous_config = json.loads((args.output / "config.json").read_text(encoding="utf-8"))
-        if any(previous_config.get(key) != config.get(key) for key in compatible):
+        if not args.linear_probe and previous_config.get("linear_probe_protocol") is not None:
+            config["linear_probe_protocol"] = previous_config["linear_probe_protocol"]
+        if (any(previous_config.get(key) != config.get(key) for key in compatible)
+                or probe_protocol_changed(previous_config)):
             parser.error("existing output directory belongs to an incompatible run")
+    tracker = start_tracker(args.output, config, enabled=args.comet,
+                            workspace=args.comet_workspace, project=args.comet_project,
+                            resume=args.resume is not None)
+
+    def finish_tracking():
+        for name in ("config.json", "metrics.csv", "linear_probe.csv"):
+            path = args.output / name
+            if path.exists():
+                tracker.log_asset(path)
+        tracker.end()
+
+    resources.callback(finish_tracking)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     if args.smoke_test:
@@ -276,7 +347,7 @@ def main():
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
-    def save_checkpoint():
+    def save_checkpoint(completed_epoch=None):
         numpy_state = np.random.get_state()
         temporary = args.output / "checkpoint.tmp"
         torch.save({
@@ -291,6 +362,49 @@ def main():
         }, temporary)
         temporary.replace(args.output / "checkpoint.pt")
 
+        if completed_epoch is not None and completed_epoch % args.checkpoint_every_epochs == 0:
+            snapshot = args.output / f"checkpoint_epoch_{completed_epoch:04d}.pt"
+            temporary_snapshot = snapshot.with_suffix(".tmp")
+            shutil.copyfile(args.output / "checkpoint.pt", temporary_snapshot)
+            temporary_snapshot.replace(snapshot)
+
+    probe_log = args.output / "linear_probe.csv"
+    probe_rows = []
+    if args.resume and probe_log.exists():
+        with probe_log.open(newline="", encoding="utf-8") as stream:
+            probe_rows = [row for row in csv.DictReader(stream)
+                          if int(row["step"]) <= step and int(row["epoch"]) <= next_epoch]
+
+    def save_probe_log():
+        temporary = probe_log.with_suffix(".tmp")
+        with temporary.open("w", newline="", encoding="utf-8") as stream:
+            probe_writer = csv.DictWriter(stream, fieldnames=[
+                "epoch", "step", "train_loss", "train_top1", "val_loss", "val_top1",
+                "train_images", "val_images", "probe_seconds",
+            ])
+            probe_writer.writeheader()
+            probe_writer.writerows(probe_rows)
+        temporary.replace(probe_log)
+
+    if args.resume and probe_log.exists():
+        save_probe_log()
+
+    def run_linear_probe(completed_epoch):
+        print(f"Linear probe monitor epoch={completed_epoch}: encoding train/val, then fitting a fresh head "
+              f"for {args.probe_epochs} head epochs", flush=True)
+        probe_encoder = target_encoder if target_encoder is not None else encoder
+        metrics = evaluate_linear_probe(
+            probe_encoder, *probe_loaders, len(selected_classes), device,
+            epochs=args.probe_epochs, lr=args.probe_lr, batch_size=args.probe_batch_size,
+            seed=args.seed, precision=args.precision,
+        )
+        probe_rows.append(dict(epoch=completed_epoch, step=step, **metrics))
+        save_probe_log()
+        tracker.log_metrics(metrics, prefix="linear_probe/", step=step, epoch=completed_epoch)
+        print(f"Linear probe epoch={completed_epoch}: train_top1={metrics['train_top1']:.2f}% "
+              f"val_top1={metrics['val_top1']:.2f}% train_loss={metrics['train_loss']:.4f} "
+              f"val_loss={metrics['val_loss']:.4f} seconds={metrics['probe_seconds']:.1f}", flush=True)
+
     fieldnames = [
         "step", "epoch", "loss", "grad_norm", "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
         "images", "step_seconds", "images_per_second", "steady_images_per_second", "eta_seconds",
@@ -302,6 +416,9 @@ def main():
         with log_path.open(newline="", encoding="utf-8") as previous:
             previous_rows = [row for row in csv.DictReader(previous) if int(row["step"]) <= step]
     session_start = time.perf_counter()
+    if (args.linear_probe and next_epoch > 0 and next_batch == 0
+            and not any(int(row["epoch"]) == next_epoch for row in probe_rows)):
+        run_linear_probe(next_epoch)
     measured_images = 0
     measured_seconds = 0.0
     session_updates = 0
@@ -390,6 +507,9 @@ def main():
                     row["target_tokens"] = int(row["target_tokens"])
                 writer.writerow(row)
                 log.flush()
+                tracker.log_metrics({key: value for key, value in row.items()
+                                     if key not in ("step", "epoch") and value is not None},
+                                    prefix="train/", step=step, epoch=epoch + 1)
                 print(f"step={step} epoch={epoch + 1} loss={row['loss']:.6f} "
                       f"context={row['context_tokens']:g} target={row['target_tokens']:g} "
                       f"lr={lr:.6g} ema={momentum:.6f} seconds={seconds:.3f} "
@@ -401,15 +521,25 @@ def main():
                     stop = True
                     stop_reason = "max-steps reached"
                     break
-            save_checkpoint()
+            save_checkpoint(completed_epoch=next_epoch if next_batch == 0 and next_epoch == epoch + 1 else None)
             del iterator
+            if args.linear_probe and next_batch == 0 and next_epoch == epoch + 1:
+                run_linear_probe(epoch + 1)
         if session_updates == 0:
             save_checkpoint()
     print(f"Stopped: {stop_reason}", flush=True)
+    tracker.log_metrics(dict(session_seconds=time.perf_counter() - session_start),
+                        prefix="runtime/", step=step, epoch=next_epoch)
     if measured_seconds:
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
+
+
+def main():
+    # Flush queued Comet metrics even when training or evaluation raises.
+    with ExitStack() as resources:
+        run_training(resources)
 
 
 if __name__ == "__main__":

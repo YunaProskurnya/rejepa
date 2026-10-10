@@ -1,12 +1,6 @@
 #!/bin/bash
+set -e
 
-# Download dataset imagenet100
-kaggle datasets download ambityga/imagenet100
-unzip imagenet100.zip && rm imagenet100.zip
-
-# Move dataset to train and val directories
-mkdir train
-mv train.X*/* train/ && rmdir train.X*
-
-mkdir val
-mv val.X*/* val/ && rmdir val.X*
+# Compatibility entry point; keep dataset preparation in scripts/.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "$script_dir/scripts/setup_imagenet100.sh"
