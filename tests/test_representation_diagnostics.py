@@ -21,8 +21,10 @@ class TestRepresentationDiagnostics(unittest.TestCase):
         features = torch.tensor([[1., 0.], [-1., 0.], [0., 1.], [0., -1.]])
         statistics = spectrum_statistics(features)
         torch.testing.assert_close(statistics["covariance"], torch.eye(2) * (2 / 3))
+        torch.testing.assert_close(statistics["singular_values"], torch.full((2,), math.sqrt(2 / 3)))
         self.assertAlmostEqual(statistics["singular_entropy"], math.log(2))
         self.assertAlmostEqual(statistics["effective_rank"], 2)
+        self.assertAlmostEqual(statistics["mean_variance"], 2 / 3)
 
         collapsed = spectrum_statistics(torch.ones(4, 2))
         self.assertEqual(collapsed["singular_entropy"], 0)
@@ -42,7 +44,10 @@ class TestRepresentationDiagnostics(unittest.TestCase):
                            depth=1, num_heads=3)
             encoder = VisionTransformer(**options)
             for epoch in range(4):
-                torch.save(dict(config={"encoder": options}, target_encoder=encoder.state_dict(),
+                weights = {name: value.clone() for name, value in encoder.state_dict().items()}
+                if epoch == 0:
+                    weights["norm.weight"].zero_()
+                torch.save(dict(config={"encoder": options}, target_encoder=weights,
                                 step=(epoch + 1) * 10), run / f"checkpoint_{epoch}.pt")
 
             command = [sys.executable, str(ROOT / "scripts/analyze_checkpoints.py"),
@@ -57,6 +62,8 @@ class TestRepresentationDiagnostics(unittest.TestCase):
                 rows = list(csv.DictReader(stream))
             self.assertEqual([int(row["epoch"]) for row in rows], [0, 1, 3])
             self.assertEqual([int(row["step"]) for row in rows], [10, 20, 40])
+            self.assertEqual(float(rows[0]["effective_rank"]), 0)
+            self.assertGreater(float(rows[1]["effective_rank"]), 0)
             for row in rows:
                 statistics = torch.load(output / row["artifact"], weights_only=True)
                 self.assertEqual(tuple(statistics["covariance"].shape), (12, 12))

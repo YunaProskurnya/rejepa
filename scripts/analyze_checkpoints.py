@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--samples", type=int, default=512)
+    parser.add_argument("--samples", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--every", type=int, default=1, help="Analyze first, last, and every Nth completed epoch")
     parser.add_argument("--seed", type=int, default=0)
@@ -91,7 +91,7 @@ def main():
             completed = {int(row["epoch"]) for row in csv.DictReader(stream)
                          if (output / row["artifact"]).exists()}
 
-    encoder = VisionTransformer(**model_options).to(device).eval().requires_grad_(False)
+    encoder = VisionTransformer(**model_options).to(device).eval()
     with csv_path.open("a", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         if stream.tell() == 0:
@@ -103,7 +103,7 @@ def main():
             if checkpoint["config"]["encoder"] != model_options:
                 raise ValueError(f"encoder architecture differs in {path}")
             encoder.load_state_dict(checkpoint["target_encoder"], strict=True)
-            statistics = evaluate_representation(encoder, loader, device, "bf16" if args.bf16 else "fp32")
+            statistics = evaluate_representation(encoder, loader, device, args.bf16)
             artifact = f"spectrum_{epoch}.pt"
             torch.save(statistics, output / artifact)
             row = {key: statistics[key] for key in fields if key in statistics}
