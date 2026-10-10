@@ -534,6 +534,21 @@ def run_training(resources):
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
+    if args.comet:
+        weights_path = args.output / "final_weights.pt"
+        temporary = weights_path.with_suffix(".tmp")
+        torch.save({
+            name: {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            for name, model in (("encoder", encoder), ("predictor", predictor),
+                                ("target_encoder", target_encoder))
+        } | {"config": config, "step": step, "epoch": next_epoch,
+             "stop_reason": stop_reason, "completed": next_epoch == args.epochs}, temporary)
+        temporary.replace(weights_path)
+        print("Sending final weights to Comet model 'rejepa'...", flush=True)
+        tracker.log_model(weights_path, metadata={
+            "step": step, "completed_epochs": next_epoch,
+            "stop_reason": stop_reason, "completed": next_epoch == args.epochs,
+        })
 
 
 def main():

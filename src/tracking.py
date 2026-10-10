@@ -75,6 +75,11 @@ class Tracker:
             self._log("asset logging", self._experiment.log_asset,
                       str(path), file_name=name, overwrite=False)
 
+    def log_model(self, path, *, metadata=None):
+        if self._experiment is not None:
+            self._log("model upload", self._experiment.log_model,
+                      "rejepa", str(path), overwrite=False, metadata=metadata)
+
     def end(self):
         if self._experiment is not None:
             experiment, self._experiment = self._experiment, None

@@ -46,6 +46,7 @@ class TestTracking(unittest.TestCase):
             with start_tracker(self.output, {}, enabled=False) as tracker:
                 tracker.log_metrics({"loss": float("nan")}, prefix="train", step=1, epoch=0)
                 tracker.log_asset(self.output / "missing.csv")
+                tracker.log_model(self.output / "missing.pt")
             tracker.end()
         self.import_sdk.assert_not_called()
         self.sdk.start.assert_not_called()
@@ -156,14 +157,16 @@ class TestTracking(unittest.TestCase):
         tracker = self.start()
         self.experiment.log_metrics.side_effect = RuntimeError("private-request-detail")
         self.experiment.log_asset.side_effect = OSError("private-request-detail")
+        self.experiment.log_model.side_effect = OSError("private-request-detail")
         self.experiment.end.side_effect = RuntimeError("private-request-detail")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             tracker.log_metrics({"loss": 1}, prefix="train", step=1, epoch=0)
             tracker.log_asset("summary.json")
+            tracker.log_model("final_weights.pt")
             tracker.end()
             tracker.end()
-        self.assertEqual(len(caught), 3)
+        self.assertEqual(len(caught), 4)
         for warning in caught:
             self.assertIn("remote data may be incomplete", str(warning.message))
             self.assertNotIn("private-request-detail", str(warning.message))
@@ -242,6 +245,9 @@ class TestCometSdkOffline(unittest.TestCase):
             asset = output / "summary.json"
             asset_content = b'{"top1": 75.0}\n'
             asset.write_bytes(asset_content)
+            weights = output / "final_weights.pt"
+            torch.save({"encoder": {"weight": torch.tensor([1.0, 2.0])}}, weights)
+            weights_content = weights.read_bytes()
             random.seed(0)  # This seed enables Comet 3.49's randomized Sentry path.
             python_state, numpy_state = random.getstate(), np.random.get_state()
             torch_state = torch.get_rng_state().clone()
@@ -259,6 +265,7 @@ class TestCometSdkOffline(unittest.TestCase):
                     tracker.log_metrics({"loss": 0.25}, prefix="train", step=7, epoch=2)
                     assert_rng_unchanged()
                     tracker.log_asset(asset, name="summary.json")
+                    tracker.log_model(weights, metadata={"step": 7, "completed": True})
             assert_rng_unchanged()
 
             archive_paths = list(archives.glob("*.zip"))
@@ -271,6 +278,8 @@ class TestCometSdkOffline(unittest.TestCase):
                 self.assertEqual(metrics, [{"metricName": "train/loss", "metricValue": 0.25,
                                             "step": 7, "epoch": 2}])
                 self.assertTrue(any(archive.read(name) == asset_content for name in archive.namelist()))
+                self.assertTrue(any(archive.read(name) == weights_content for name in archive.namelist()))
+                self.assertIn("rejepa", json.dumps(messages))
                 self.assertIn("evaluation.batch_size", json.dumps(messages))
             connect.assert_not_called()
 

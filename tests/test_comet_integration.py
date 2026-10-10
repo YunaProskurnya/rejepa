@@ -59,6 +59,14 @@ class Experiment:
     def end(self):
         record("end", key=self.key)
 
+    def log_model(self, name, file_or_folder, *, overwrite, metadata):
+        import torch
+        path = Path(file_or_folder)
+        weights = torch.load(path, map_location="cpu", weights_only=True)
+        record("model", key=self.key, name=name, path=str(path), overwrite=overwrite,
+               metadata=metadata, components=sorted(weights), step=weights["step"],
+               completed=weights["completed"])
+
 
 def start(*, api_key, experiment_config, **options):
     # Validate only the supplied test credential; never record credentials.
@@ -123,6 +131,7 @@ class TestCometIntegration(unittest.TestCase):
         self.launch(*base, "--output", plain, "--no-comet")
         self.assertEqual(self.events(), [])
         self.assertFalse((plain / "comet.json").exists())
+        self.assertFalse((plain / "final_weights.pt").exists())
 
         self.launch(*base, "--output", tracked, *comet, "--max-steps", "1")
         identity = json.loads((tracked / "comet.json").read_text(encoding="utf-8"))
@@ -204,6 +213,23 @@ class TestCometIntegration(unittest.TestCase):
                 self.assertNotIn(FAKE_KEY, json.dumps(event["values"]))
         self.assertNotIn(FAKE_KEY, (tracked / "config.json").read_text(encoding="utf-8"))
         self.assertNotIn(FAKE_KEY, (tracked / "comet.json").read_text(encoding="utf-8"))
+        models = [event for event in events if event["kind"] == "model"]
+        self.assertEqual([event["step"] for event in models], [1, 2])
+        self.assertEqual([event["completed"] for event in models], [False, True])
+        self.assertTrue(all(event["name"] == "rejepa" for event in models))
+        self.assertTrue(all(event["key"] == identity["experiment_key"] for event in models))
+        self.assertTrue(all(not event["overwrite"] for event in models))
+        for event in models:
+            self.assertEqual(event["step"], event["metadata"]["step"])
+            self.assertEqual(event["completed"], event["metadata"]["completed"])
+            self.assertIn("target_encoder", event["components"])
+            self.assertNotIn("optimizer", event["components"])
+        weights = torch.load(tracked / "final_weights.pt", weights_only=True)
+        self.assertEqual(weights["config"], actual["config"])
+        for component in ("encoder", "predictor", "target_encoder"):
+            for name, tensor in actual[component].items():
+                torch.testing.assert_close(weights[component][name], tensor, rtol=0, atol=0)
+                self.assertEqual(weights[component][name].device.type, "cpu")
 
     def test_inactive_sdk_fails_before_training_and_closes_experiment(self):
         self.env["FAKE_COMET_DISABLED"] = "1"
