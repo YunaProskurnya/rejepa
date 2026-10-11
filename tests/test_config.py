@@ -19,7 +19,7 @@ class TestExperimentConfig(unittest.TestCase):
         parser.add_argument("--max-steps", type=int)
         parser.add_argument("--lr", type=float, default=0.001)
         parser.add_argument("--device", default="cpu")
-        parser.add_argument("--model", choices=("tiny", "vit_base"), default="tiny")
+        parser.add_argument("--collator", choices=("custom", "reference"), default="custom")
         return parser
 
     def parse_config(self, config, *argv):
@@ -38,7 +38,7 @@ class TestExperimentConfig(unittest.TestCase):
     def test_defaults_work_without_a_file(self):
         args = parse_config_args(self.make_parser(), [])
         self.assertEqual(args.batch_size, 2)
-        self.assertEqual(args.model, "tiny")
+        self.assertEqual(args.collator, "custom")
         self.assertIsNone(args.config)
 
     def test_json_types_and_paths(self):
@@ -51,15 +51,15 @@ class TestExperimentConfig(unittest.TestCase):
         self.assertIsInstance(args.lr, float)
         self.assertTrue(args.smoke_test)
         self.assertEqual(args.device, "cuda:0")
-        self.assertEqual(args.model, "tiny")
+        self.assertEqual(args.collator, "custom")
 
     def test_cli_overrides_json_including_false(self):
         args = self.parse_config({"batch_size": 8, "smoke_test": True,
-                                  "model": "vit_base"},
-                                 "--batch-size", "4", "--no-smoke-test", "--model", "tiny")
+                                  "collator": "reference"},
+                                 "--batch-size", "4", "--no-smoke-test", "--collator", "custom")
         self.assertEqual(args.batch_size, 4)
         self.assertFalse(args.smoke_test)
-        self.assertEqual(args.model, "tiny")
+        self.assertEqual(args.collator, "custom")
 
     def test_nullable_options(self):
         args = self.parse_config({"data": None, "max_steps": None})
@@ -69,8 +69,8 @@ class TestExperimentConfig(unittest.TestCase):
         self.assert_config_error({"smoke_test": None}, "does not accept null")
 
     def test_invalid_choices_are_checked_before_cli_overrides(self):
-        self.assert_config_error({"model": "typo"}, "invalid config option 'model'",
-                                 "--model", "tiny")
+        self.assert_config_error({"collator": "typo"}, "invalid config option 'collator'",
+                                 "--collator", "custom")
 
     def test_unknown_keys_and_recursive_configs_are_rejected(self):
         for key in ("batch_szie", "batch-size", "config", "help"):

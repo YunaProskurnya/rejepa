@@ -19,7 +19,7 @@ class TestKnnEvaluation(unittest.TestCase):
             folder = Path(temporary)
             checkpoint_dir = folder / "run"
             training = subprocess.run(
-                [sys.executable, str(root / "scripts/train.py"), "--smoke-test", "--mode", "joint",
+                [sys.executable, str(root / "tests/run_training.py"), "--smoke-test", "--mode", "joint",
                  "--max-steps", "1", "--output", str(checkpoint_dir)],
                 cwd=root, capture_output=True, text=True, timeout=90,
             )

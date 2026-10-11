@@ -2,11 +2,15 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import random
+import shutil
 import sys
 import time
 
+from comet_ml import start
+from comet_ml.integration.pytorch import log_model
 import numpy as np
 import PIL
 import torch
@@ -20,9 +24,9 @@ from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
 from src.models.target_encoder import create_target_encoder
 from src.config import parse_config_args
-from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.optimizer import create_optimizer
 from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
+from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
 from src.train_step import train_step
 
@@ -104,6 +108,9 @@ def parse_args(argv=None):
 def main():
     parser, args = parse_args()
 
+    if not os.environ.get("COMET_API_KEY"):
+        parser.error("COMET_API_KEY is required; source .env before running")
+
     random.seed(args.seed)
     np.random.seed(args.seed % (2**32))
     torch.manual_seed(args.seed)
@@ -159,6 +166,8 @@ def main():
     if args.collator == "reference":
         collator = ReferenceMaskCollator(**mask_options)
     else:
+        if mask_options["nenc"] != 1 or mask_options["allow_overlap"]:
+            parser.error("custom collator supports one context and allow_overlap=False")
         custom_options = {key: value for key, value in mask_options.items()
                           if key not in ("nenc", "npred", "allow_overlap")}
         collator = CustomMaskCollator(**custom_options, M=mask_options["npred"])
@@ -256,20 +265,9 @@ def main():
             "regularizer_weight", "total_steps",
             "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
-        legacy_defaults = dict(collator="custom", mode="ema", regularizer="none",
-                               regularizer_weight=0.02)
-
-        def previous_value(saved, key):
-            value = saved.get(key, legacy_defaults.get(key))
-            if key == "masks" and isinstance(value, dict) and "M" in value:
-                value = {**value, "nenc": 1, "npred": value["M"], "allow_overlap": False}
-                del value["M"]
-            return value
-
-        differences = [
-            key for key in compatible
-            if previous_value(checkpoint["config"], key) != config.get(key)
-        ]
+        defaults = dict(mode="ema", regularizer="none", regularizer_weight=0.02)
+        differences = [key for key in compatible
+                       if checkpoint["config"].get(key, defaults.get(key)) != config.get(key)]
         if differences:
             parser.error("resume configuration differs: " + ", ".join(differences))
         if "next_batch" not in checkpoint:
@@ -299,17 +297,19 @@ def main():
         parser.error("output already exists; choose a new directory or pass --resume")
     if args.output.exists() and args.resume and (args.output / "config.json").exists():
         previous_config = json.loads((args.output / "config.json").read_text(encoding="utf-8"))
-        if any(previous_value(previous_config, key) != config.get(key) for key in compatible):
+        if any(previous_config.get(key, defaults.get(key)) != config.get(key) for key in compatible):
             parser.error("existing output directory belongs to an incompatible run")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
+    experiment.log_parameters(config)
     if args.smoke_test:
         print("Synthetic images: checks execution only, not representation quality.", flush=True)
     print(f"model={args.model} collator={args.collator} device={device} precision={args.precision} images={len(dataset)} "
           f"classes={len(selected_classes) if selected_classes is not None else 'n/a'} "
           f"updates_per_epoch={updates_per_epoch} effective_batch={config['effective_batch_size']}", flush=True)
 
-    def save_checkpoint():
+    def save_checkpoint(completed_epoch=None):
         numpy_state = np.random.get_state()
         temporary = args.output / "checkpoint.tmp"
         checkpoint = {
@@ -326,6 +326,10 @@ def main():
             checkpoint["target_encoder"] = target_encoder.state_dict()
         torch.save(checkpoint, temporary)
         temporary.replace(args.output / "checkpoint.pt")
+
+        if completed_epoch is not None:
+            shutil.copyfile(args.output / "checkpoint.pt", temporary)
+            temporary.replace(args.output / f"checkpoint_{completed_epoch}.pt")
 
     fieldnames = [
         "step", "epoch", "loss", "prediction_loss", "regularization_loss", "grad_norm",
@@ -437,6 +441,8 @@ def main():
                     row["target_tokens"] = int(row["target_tokens"])
                 writer.writerow(row)
                 log.flush()
+                experiment.log_metrics({key: value for key, value in row.items() if value is not None},
+                                       step=step, epoch=epoch + 1)
                 print(f"step={step} epoch={epoch + 1} loss={row['loss']:.6f} "
                       f"prediction={row['prediction_loss']:.6f} regularization={row['regularization_loss']:.6f} "
                       f"context={row['context_tokens']:g} target={row['target_tokens']:g} "
@@ -451,7 +457,7 @@ def main():
                     stop = True
                     stop_reason = "max-steps reached"
                     break
-            save_checkpoint()
+            save_checkpoint(completed_epoch=epoch if next_epoch == epoch + 1 and next_batch == 0 else None)
             del iterator
         if session_updates == 0:
             save_checkpoint()
@@ -460,6 +466,11 @@ def main():
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
+    model_state = {"encoder": encoder.state_dict(), "predictor": predictor.state_dict()}
+    if target_encoder is not None:
+        model_state["target_encoder"] = target_encoder.state_dict()
+    log_model(experiment, model_state, model_name="rejepa")
+    experiment.end()
 
 
 if __name__ == "__main__":

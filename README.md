@@ -1,7 +1,6 @@
 # rejepa
 
-Воспроизведение I-JEPA на PyTorch: наши encoder/predictor, Smooth L1 и AdamW.
-Доступны режимы EMA и joint с общим энкодером и регуляризацией.
+Воспроизведение I-JEPA на PyTorch: наши encoder/predictor, Smooth L1, AdamW и EMA.
 Поддерживается обучение на одном устройстве (CPU или GPU).
 
 ## Установка и проверка запуска
@@ -13,6 +12,9 @@
 
 ```sh
 python -m pip install -r requirements.txt
+set -a
+source .env
+set +a
 python scripts/train.py --config configs/smoke.json
 ```
 
@@ -20,18 +22,29 @@ python scripts/train.py --config configs/smoke.json
 ничего не скачивает и сохраняет конфигурацию, метрики и checkpoint.
 Каждому новому запуску нужна отдельная папка `--output`.
 
-## ImageNet100
+## Comet
 
-Для скачивания нужны Kaggle CLI (включён в `requirements.txt`) с настроенным
-доступом к аккаунту и системная утилита `unzip`.
-[Установка и авторизация Kaggle CLI](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md).
-Один раз выполните скрипт из `data_encoder` в пустой папке для датасета:
+Comet включён для каждого запуска в `superustam/rejepa`. Загрузите локальный API key:
 
 ```sh
-mkdir -p data/imagenet100
-(cd data/imagenet100 && bash -e ../../scripts/setup_imagenet100.sh)
+source .venv/bin/activate
+set -a
+source .env
+set +a
+python scripts/train.py --config configs/imagenet100_vit_base.json
 ```
 
+`.env` исключён из Git. На другом компьютере задайте `COMET_API_KEY` в окружении.
+В Comet отправляются параметры запуска, метрики каждого шага и финальные
+веса encoder, predictor и target encoder через
+[`log_model`](https://www.comet.com/docs/v2/integrations/ml-frameworks/pytorch/).
+Без `COMET_API_KEY` обучение не запускается. Флагов включения и отключения Comet нет.
+Каждый запуск, включая smoke test и `--resume`, создаёт отдельный Comet experiment.
+
+## ImageNet100
+
+Команды находятся в `scripts/setup_imagenet100.sh`; вместо блока выше
+можно выполнить `bash -e ../../scripts/setup_imagenet100.sh` из папки `data/imagenet100`.
 После подготовки получатся `data/imagenet100/train/<класс>/` и
 `data/imagenet100/val/<класс>/`. Конфиг обучения уже использует этот путь.
 
@@ -94,10 +107,38 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
 Маски генерируются заново для каждого батча.
 
-По умолчанию используется collator команды из `src/datasets/imagenet100.py`.
-`--collator reference` выбирает исходный collator I-JEPA. После 20 неудачных
-попыток получить достаточно большой контекст часть ограничений на пересечение с targets
-постепенно снимается.
+## Режимы обучения и регуляризация
+
+`--mode ema` сохраняет базовое обучение: отдельный target encoder заморожен и
+обновляется через EMA. `--mode joint` использует один обучаемый encoder для
+контекста и полного изображения. В joint доступны `--regularizer none`,
+`sigreg` и `visreg`; по умолчанию выбран `sigreg`. Регуляризатор применяется
+к эмбеддингам каждой позиции патча по батчу, его вклад задаётся
+`--regularizer-weight` (по умолчанию `0.02`).
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --mode joint --regularizer sigreg \
+  --output runs/imagenet100-vit-base-joint
+```
+
+Joint checkpoint содержит обучаемый `encoder` без отдельного `target_encoder`.
+Режим и регуляризатор нельзя менять при продолжении запуска. Формулы
+регуляризаторов описаны в [src/regularizers/README.md](src/regularizers/README.md).
+
+По умолчанию используется collator команды: `--collator custom`, реализация
+в `src/datasets/imagenet100.py`. Авторский вариант включается через
+`--collator reference`. Оба возвращают одинаковый формат батча, поэтому encoder,
+predictor и training step не меняются. Для проверки авторского варианта:
+
+```sh
+python scripts/train.py --config configs/smoke.json --collator reference --output runs/reference-smoke
+```
+
+Оба варианта повторяют правило reference: после 20 неудачных попыток получить
+достаточно большой контекст часть ограничений на пересечение с targets
+постепенно снимается. При текущих настройках маски обоих collator проверены на
+совпадение.
 
 Основные параметры:
 
@@ -105,20 +146,15 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 | --- | --- |
 | `--model tiny / vit_base / vit_large` | По умолчанию `tiny` для проверки. `vit_base` — ViT-B/16: encoder 768×12 блоков, predictor 384×6 блоков. |
 | `--device cpu / cuda` | По умолчанию CPU. |
-| `--batch-size`, `--accumulation-steps` | Эффективный batch size — их произведение; optimizer, EMA в соответствующем режиме и расписания обновляются после накопления. |
+| `--batch-size`, `--accumulation-steps` | Эффективный batch size — их произведение; optimizer, EMA и расписания обновляются после накопления. |
 | `--precision fp32 / bf16` | По умолчанию FP32; BF16 уменьшает затраты памяти на поддерживаемом оборудовании. |
 | `--epochs`, `--warmup-epochs` | По умолчанию 1 и 0; warmup должен быть короче обучения. |
 | `--lr`, `--weight-decay`, `--ema-start` | Пиковый LR, начальные weight decay и EMA; остальные параметры расписаний доступны в `--help`. |
-| `--mode ema / joint` | По умолчанию EMA с отдельным замороженным target encoder. В joint энкодер общий для контекста и полного изображения; обе ветви обучаются. |
-| `--regularizer none / sigreg / visreg` | По умолчанию `none` в EMA и `sigreg` в joint. Регуляризация доступна только в joint. |
-| `--regularizer-weight` | Вес регуляризации в сумме с prediction loss; по умолчанию `0.02`. |
 | `--num-workers`, `--seed` | Загрузка данных и воспроизводимость; по умолчанию 0 и 0. |
 
 При нехватке памяти уменьшайте batch size, при необходимости компенсируйте его
 накоплением градиентов. Маски согласуются внутри каждого микробатча, поэтому
 накопление не полностью эквивалентно одному большому батчу.
-В joint регуляризация считается отдельно на каждом микробатче. Для SIGReg и VISReg
-размер микробатча (`--batch-size`) должен быть не меньше двух.
 
 ## Результаты и продолжение
 
@@ -127,6 +163,7 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 - `config.json` — полная фактическая конфигурация запуска после объединения JSON и CLI;
 - `metrics.csv` — loss, градиенты, расписания, скорость и память GPU;
 - `checkpoint.pt` — модели, оптимизатор, расписания, генераторы случайных чисел и прогресс.
+- `checkpoint_0.pt`, `checkpoint_1.pt`, … — отдельный checkpoint после каждой полностью завершённой эпохи, с нумерацией от нуля; сохраняется по умолчанию.
 
 В `config.json` и `checkpoint["config"]` сохраняются одинаковые параметры:
 итоговые аргументы, модели со значениями по умолчанию, маски, preprocessing,
@@ -140,7 +177,26 @@ objective, optimizer, schedules, версии библиотек и список
 Checkpoint обновляется каждые `--checkpoint-every` шагов оптимизатора (по умолчанию
 100), в конце эпохи и при штатной остановке. Для продолжения повторите исходную
 команду с тем же `--output` и добавьте `--resume path/to/checkpoint.pt`.
-Параметры данных и обучения, включая общее число эпох, batch size и накопление,
+Для продолжения с конкретной эпохи используйте `--resume path/to/checkpoint_N.pt` (N — индекс эпохи от нуля).
+
+Отдельный флаг для сохранения каждой эпохи не нужен. Пример запуска:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json --output runs/my-run
+```
+
+Продолжение с checkpoint первой эпохи с теми же настройками и папкой вывода:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --output runs/my-run --resume runs/my-run/checkpoint_0.pt
+```
+
+`--checkpoint-every 100` задаёт дополнительные сохранения в `checkpoint.pt`
+каждые 100 шагов оптимизатора. Отдельные checkpoint эпох сохраняются автоматически
+и занимают дополнительное место на диске.
+
+Параметры данных и обучения, включая collator, общее число эпох, batch size и накопление,
 должны совпадать. Если предел шагов достигнут, увеличьте `--max-steps`
 или установите `"max_steps": null` в исходном JSON.
 Если после проверки меняете общее число эпох, начните новый запуск с отдельным
@@ -151,9 +207,8 @@ Checkpoint обновляется каждые `--checkpoint-every` шагов �
 ## Оценка представлений
 
 kNN проверяет, насколько хорошо классы разделяются в признаках замороженного
-**target encoder** в EMA или общего **encoder** в joint. Его patch tokens
-усредняются в один вектор изображения и нормализуются. Для каждого изображения
-из val ищутся ближайшие по косинусной
+**target encoder** для EMA или общего **encoder** для joint. Его patch tokens усредняются в один вектор изображения и
+нормализуются. Для каждого изображения из val ищутся ближайшие по косинусной
 близости изображения из train; их метки голосуют за класс, с большим весом у
 более близких соседей. Отдельный классификатор не обучается.
 
@@ -176,35 +231,6 @@ JSON содержит top-1/top-5 accuracy, прирост top-1 в процен
 сохраняйте одинаковые данные и параметры оценки. kNN не заменяет linear probe
 из статьи.
 
-## Регуляризация и линейная оценка
-
-[Описание и использование SIGReg и VISReg](src/regularizers/README.md).
-В joint одно и то же обучаемое ядро энкодера вызывается для контекста с маской и
-для полного изображения. Выход полного изображения `[B, P, D]` служит источником
-целевых патчей и регуляризации. Для каждой позиции `p` регуляризатор получает
-`features[:, p, :]`, затем результаты усредняются по `P`. Маска контекста не
-исключает патчи из регуляризации. Градиенты prediction loss проходят через оба
-вызова энкодера. Цели дополнительно нормализуются, а регуляризатор получает выход
-энкодера до этой нормализации.
-
-```sh
-python scripts/train.py --config configs/imagenet100_vit_base.json --mode joint --regularizer sigreg --regularizer-weight 0.02 --output runs/imagenet100-vit-base-joint
-```
-
-Для VISReg замените `sigreg` на `visreg`. `none` в joint оставлен для сравнительного
-эксперимента. `metrics.csv` сохраняет общий, prediction и regularization loss.
-Checkpoint joint содержит один энкодер; режим и регуляризатор нельзя менять при resume.
-
-`evaluate_linear_probe` обучает линейную голову на признаках замороженного encoder.
-Ему нужны загрузчики `(images, labels)` для train и val с одинаковой нумерацией классов.
-Описание вызова находится в `src/eval_linear.py`.
-
-## Обратить внимание
-
-1. **Размеры масок в `src/masks.py`.** Сторона блока ограничена `grid - 1`, а `torch.randint(0, grid - block_h)` исключает последнее допустимое положение. После 20 неудачных попыток получить достаточно большой контекст ограничения на пересечение с target постепенно снимаются.
-
-2. **VISReg.** Перед экспериментами сверить формулы и масштабы трёх слагаемых с [детальным описанием в README регуляризаторов](src/regularizers/README.md#формулы-visreg): особенно усреднение `center_loss` и `shape_loss`, а также `eps=1e-6` при нормализации.
-
 ## Где читать и менять код
 
 `src/` содержит метод, `scripts/` — рабочие запуски обучения и оценки,
@@ -212,21 +238,22 @@ Checkpoint joint содержит один энкодер; режим и рег�
 `data/` — локальные датасеты, `runs/` — локальные результаты.
 
 - `src/models/` — encoder, predictor и функции target encoder/EMA.
-- `src/train_step.py` — один шаг: цели → предсказания → loss → backward → optimizer → EMA при соответствующем режиме.
+- `src/train_step.py` — один шаг: цели → предсказания → loss → backward → optimizer → EMA.
 - `src/optimizer.py` и `src/losses.py` — группы параметров AdamW и функция потерь.
 - `scripts/train.py` — параметры, DataLoader, цикл, расписания и сохранение.
 - `scripts/evaluate_knn.py` — оценка сохранённой модели.
-- `scripts/setup_imagenet100.sh` — скачивание и раскладка ImageNet100.
+- `scripts/setup_imagenet100.sh` — команды команды для скачивания и раскладки ImageNet100.
 - `src/config.py` — чтение JSON и проверка настроек запуска.
-- `src/reference/schedulers.py` — расписания LR/weight decay.
+- `src/reference/` — авторские collator и расписания LR/weight decay.
 - `src/datasets/imagenet100.py` — collator команды и общая сборка DataLoader;
   `make_imagenet100` читает `root/train` или `root/val` и возвращает dataset, loader, sampler.
   При его отдельном использовании в обучении вызывайте `sampler.set_epoch(epoch)` перед каждой эпохой.
 
-Расписания в `reference` взяты без изменений из
+Файлы `reference` взяты без изменений из
 [facebookresearch/ijepa, commit 52c1ae95](https://github.com/facebookresearch/ijepa/tree/52c1ae95d05f743e000e8f10a1f3a79b10cff048).
-Источник и лицензия CC BY-NC 4.0 находятся рядом. Collator команды перенесён
-из ветки `data_encoder` (commit `930120e`) с адаптацией интерфейсов. Он возвращает батч:
+Источник и лицензия CC BY-NC 4.0 находятся рядом. Реализация команды перенесена
+из ветки `data_encoder` (commit `930120e`) с адаптацией интерфейсов.
+Оба collator сохраняют контракт батча:
 `((images, labels), [context_indices], [target_indices_1, ...])`.
 Индексы относятся к сетке патчей после crop/resize; каждый набор имеет форму `[B, K]`.
 

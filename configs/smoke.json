@@ -1,6 +1,7 @@
 {
   "smoke_test": true,
   "output": "runs/smoke",
+  "collator": "custom",
   "model": "tiny",
   "device": "cpu",
   "precision": "fp32",

@@ -62,6 +62,7 @@ kaggle.json
 /train.X*/
 /val.X*/
 /cifar-10-batches-py/
+Labels.json
 
 # Downloaded archives and partial downloads
 *.zip

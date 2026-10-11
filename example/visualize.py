@@ -17,7 +17,7 @@ from torchvision.io import ImageReadMode, read_image
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.masks import pick_context_patches, pick_target_patches, sample_block_size
+from src.masks import pick_context_patches, pick_target_patches
 from src.transforms import make_transform, process_image
 
 IMAGE_PATH = REPO_ROOT / "example" / "lenna.png"
@@ -113,12 +113,17 @@ def _sample_context_rectangle(
     min_keep=10,
     allow_overlap=False,
 ):
-    torch.manual_seed(seed)
-    target_h, target_w = sample_block_size(side, (0.15, 0.2), (0.75, 1.5))
-    block_h, block_w = sample_block_size(side, scale, aspect_ratio)
-    for _ in range(4):
-        torch.randint(0, side - target_h, ())
-        torch.randint(0, side - target_w, ())
+    device = torch.device("cpu")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+    scale_min, scale_max = scale
+    ratio_min, ratio_max = aspect_ratio
+    u = torch.rand((), device=device, generator=generator).item()
+    scale = scale_min + u * (scale_max - scale_min)
+    ratio = ratio_min + u * (ratio_max - ratio_min)
+    area = int(side * side * scale)
+    block_h = min(round((area * ratio) ** 0.5), side - 1)
+    block_w = min(round((area / ratio) ** 0.5), side - 1)
 
     if allow_overlap:
         exclusions = []
@@ -127,8 +132,8 @@ def _sample_context_rectangle(
     dropped = 0
     attempts = 0
     while True:
-        top = torch.randint(0, side - block_h, ()).item()
-        left = torch.randint(0, side - block_w, ()).item()
+        top = torch.randint(0, side - block_h, (), device=device, generator=generator).item()
+        left = torch.randint(0, side - block_w, (), device=device, generator=generator).item()
         kept = _rectangle_indices(top, left, block_h, block_w, side)
         active = exclusions[: max(len(exclusions) - dropped, 0)]
         if active:
@@ -215,9 +220,27 @@ def _show_denormalized(tensor):
     return image.resize((PANEL, PANEL), Image.Resampling.NEAREST)
 
 
-def _show_normalized(tensor):
+def _normalize_view(tensor):
     shown = (tensor * 0.25 + 0.5).clamp(0, 1)
-    return T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
+    image = T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
+    draw = ImageDraw.Draw(image)
+    font = _font(18)
+    lines = (
+        "(x - mean) / std",
+        f"mean  {MEAN[0]:.3f}  {MEAN[1]:.3f}  {MEAN[2]:.3f}",
+        f"std   {STD[0]:.3f}  {STD[1]:.3f}  {STD[2]:.3f}",
+        "shown as x / 4 + 0.5",
+    )
+    line_h = 22
+    pad = 10
+    width = max(draw.textlength(line, font=font) for line in lines)
+    box = (12, 12, int(12 + pad * 2 + width), 12 + pad * 2 + line_h * len(lines))
+    draw.rectangle(box, fill=PAPER)
+    y = 12 + pad
+    for line in lines:
+        draw.text((12 + pad, y), line, fill=INK, font=font)
+        y += line_h
+    return image
 
 
 def _number_view(image, patch_size, grid):
@@ -241,6 +264,13 @@ def _number_view(image, patch_size, grid):
                 stroke_width=2,
                 stroke_fill=(20, 20, 20),
             )
+    return view
+
+
+def _grid_view(image, patch_size):
+    view = image.copy()
+    draw = ImageDraw.Draw(view)
+    _draw_grid(draw, view.width, patch_size, (255, 255, 255))
     return view
 
 
@@ -365,11 +395,8 @@ def main():
     if (grid, patch_size, grid * grid) != (14, 16, PATCH_NUM):
         raise SystemExit(f"unexpected patch grid {grid}x{grid} patch {patch_size}")
 
-    torch.manual_seed(SEED)
-    target_size = sample_block_size(grid, (0.15, 0.2), (0.75, 1.5))
-    context_size = sample_block_size(grid, (0.85, 1.0), (1.0, 1.0))
-    fresh_targets = pick_target_patches(grid, target_size)
-    fresh_context = pick_context_patches(grid, fresh_targets, context_size)
+    fresh_targets = pick_target_patches(grid, seed=SEED)
+    fresh_context = pick_context_patches(grid, fresh_targets, seed=SEED)
     for got, expected in zip(target_indices, fresh_targets):
         if not torch.equal(got, expected):
             raise SystemExit("process_image targets do not match pick_target_patches")
@@ -405,27 +432,22 @@ def main():
 
     display_patch = PANEL // grid
     model = _show_denormalized(normalized)
-    normalized_view = _show_normalized(normalized)
     kept = int(context_indices.numel())
     title_font = _font(20)
     panels = [
         _panel("1  Source RGB", source_view, title_font),
         _panel("2  Random resized crop", crop_view, title_font),
         _panel("3  Resized to 224", _show_pil(stages["RandomResizedCrop"]), title_font),
-        _panel("4  Normalize", normalized_view, title_font),
+        _panel("4  Normalize", _normalize_view(normalized), title_font),
         _panel("5  Patch numbers", _number_view(model, display_patch, grid), title_font),
+        _panel("6  Patch grid, denormalized", _grid_view(model, display_patch), title_font),
         _panel(
-            "6  Initial context mask",
-            _mask_view(normalized_view, [], crop, display_patch),
-            title_font,
-        ),
-        _panel(
-            f"7  Masks on grid kept {kept}",
+            f"7  Masks on grid  kept {kept}",
             _mask_view(model, blocks, crop, display_patch, excluded_blocks),
             title_font,
         ),
         _panel(
-            f"8  Context without targets kept {kept}",
+            f"8  Context without targets  kept {kept}",
             _context_holes_view(model, crop, excluded_blocks, display_patch),
             title_font,
         ),

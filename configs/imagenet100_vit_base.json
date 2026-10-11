@@ -1,5 +1,5 @@
 {
-  "data": "data/imagenet100/train",
+  "data": "train",
   "dataset": "imagefolder",
   "output": "runs/imagenet100-vit-base-10ep",
   "collator": "custom",

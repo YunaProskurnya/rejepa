@@ -1,4 +1,4 @@
-"""Checks for the team collator and data loader."""
+"""Compatibility checks for the optional team collator and data loader."""
 
 from pathlib import Path
 import subprocess
@@ -14,6 +14,7 @@ from torchvision.transforms import ToTensor
 
 from src.datasets.imagenet100 import MaskCollator, make_data_loader, make_imagenet100
 from src.masks import pick_context_patches, pick_target_patches, sample_block_size
+from src.reference.multiblock import MaskCollator as ReferenceCollator
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,19 +31,19 @@ class TestMaskCollator(unittest.TestCase):
     def tearDown(self):
         torch.set_rng_state(self.rng_state)
 
-    def test_batches_are_reproducible_including_rng_state(self):
+    def test_24_batches_match_reference_including_rng_state(self):
         batch = [(torch.full((3, 224, 224), float(index)), index) for index in range(3)]
         for seed in (0, 1, 17):
             torch.manual_seed(seed)
-            first = MaskCollator(**OPTIONS, M=4)
-            expected = [(first(batch), torch.get_rng_state()) for _ in range(8)]
+            reference = ReferenceCollator(**OPTIONS, nenc=1, npred=4, allow_overlap=False)
+            expected = [(reference(batch), torch.get_rng_state()) for _ in range(8)]
             torch.manual_seed(seed)
-            second = MaskCollator(**OPTIONS, M=4)
-            for index, (first_batch, first_rng) in enumerate(expected):
+            custom = MaskCollator(**OPTIONS, M=4)
+            for index, (reference_batch, reference_rng) in enumerate(expected):
                 with self.subTest(seed=seed, batch=index):
-                    actual = second(batch)
+                    actual = custom(batch)
                     self.assertEqual([len(group) for group in actual], [2, 1, 4])
-                    for wanted_group, actual_group in zip(first_batch, actual):
+                    for wanted_group, actual_group in zip(reference_batch, actual):
                         for wanted, value in zip(wanted_group, actual_group):
                             torch.testing.assert_close(value, wanted, rtol=0, atol=0)
                     for group in actual[1:]:
@@ -51,8 +52,8 @@ class TestMaskCollator(unittest.TestCase):
                             self.assertEqual(mask.device.type, "cpu")
                             self.assertEqual(mask.shape[0], len(batch))
                             self.assertGreater(mask.shape[1], OPTIONS["min_keep"])
-                    self.assertTrue(torch.equal(torch.get_rng_state(), first_rng))
-                    self.assertEqual(second._itr_counter.value, index)
+                    self.assertTrue(torch.equal(torch.get_rng_state(), reference_rng))
+                    self.assertEqual(custom._itr_counter.value, index)
 
     def test_legacy_seeded_helpers_leave_global_rng_unchanged(self):
         for kwargs in ({}, {"seed": 19}):
@@ -79,14 +80,22 @@ class TestMaskCollator(unittest.TestCase):
         pick_context_patches(14, targets, block_size=context_size, seed=None)
         self.assertFalse(torch.equal(after_targets, torch.get_rng_state()))
 
-    def test_context_relaxes_full_exclusion_after_20_attempts(self):
+    def test_context_relaxes_full_exclusion_after_20_attempts_like_reference(self):
+        reference = ReferenceCollator(input_size=128, patch_size=16, min_keep=10)
+        torch.manual_seed(23)
+        with patch("torch.randint", wraps=torch.randint) as draws:
+            expected, _ = reference._sample_block_mask((7, 7), [torch.zeros(8, 8, dtype=torch.int32)])
+        self.assertEqual(draws.call_count, 42)  # two coordinates per attempt, then success
+        expected_rng = torch.get_rng_state()
         torch.manual_seed(23)
         with patch("torch.randint", wraps=torch.randint) as draws:
             actual = pick_context_patches(
                 8, [torch.arange(64)], block_size=(7, 7), min_keep=10, seed=None,
             )
-        self.assertEqual(draws.call_count, 42)  # two coordinates per attempt, then success
+        self.assertEqual(draws.call_count, 42)
         self.assertEqual(actual.numel(), 49)
+        self.assertTrue(torch.equal(actual, expected))
+        self.assertTrue(torch.equal(torch.get_rng_state(), expected_rng))
 
     def test_invalid_settings_raise_without_hanging(self):
         # Bound this regression check even if impossible min_keep starts looping again.
