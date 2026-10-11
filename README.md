@@ -202,11 +202,13 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 python scripts/analyze_checkpoints.py \
   --checkpoints runs/imagenet100-vit-base-600ep \
   --data data/imagenet100/val \
-  --device cuda --bf16 --samples 1024 --every 25
+  --device cuda --bf16 --samples 1024
 ```
 
-`--every 25` выбирает первую, последнюю и каждую 25-ю завершённую эпоху;
-без флага анализируются все checkpoint. Результаты появятся в
+Команду запускайте из корня репозитория на VM, заменив пути к папке с
+`checkpoint_N.pt` и к ImageFolder `val`, если они расположены иначе.
+Без `--every` анализируются все checkpoint; `--every 25` выбирает первую,
+последнюю и каждую 25-ю завершённую эпоху. Результаты появятся в
 `runs/imagenet100-vit-base-600ep/representation_analysis/`: таблица
 `representations.csv` для графиков, `spectrum_N.pt` с полной матрицей ковариации
 и сингулярными числами, `settings.json` со списком выбранных изображений.

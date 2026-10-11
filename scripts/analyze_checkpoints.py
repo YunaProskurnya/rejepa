@@ -49,9 +49,7 @@ def main():
     checkpoints = [item for item in checkpoints if item == checkpoints[0] or item == checkpoints[-1]
                    or (item[0] + 1) % args.every == 0]
 
-    first = torch.load(checkpoints[0][1], map_location="cpu", weights_only=True)
-    model_options = first["config"]["encoder"]
-    del first
+    model_options = torch.load(checkpoints[0][1], map_location="cpu", weights_only=True)["config"]["encoder"]
     image_size = model_options.get("image_size", 224)
     transform = transforms.Compose([
         transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
