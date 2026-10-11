@@ -27,7 +27,6 @@ def spectrum_statistics(features):
         entropy = 0.0
 
     return {
-        "covariance": covariance.float(),
         "singular_values": singular_values.float(),
         "singular_entropy": entropy,
         "effective_rank": math.exp(entropy) if total > 0 else 0.0,

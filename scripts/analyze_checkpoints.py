@@ -16,7 +16,7 @@ from src.representation_diagnostics import evaluate_representation
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze saved I-JEPA target encoder checkpoints")
+    parser = argparse.ArgumentParser(description="Analyze saved I-JEPA encoder checkpoints")
     parser.add_argument("--checkpoints", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True, help="ImageFolder directory, preferably validation images")
     parser.add_argument("--output", type=Path)
@@ -49,7 +49,10 @@ def main():
     checkpoints = [item for item in checkpoints if item == checkpoints[0] or item == checkpoints[-1]
                    or (item[0] + 1) % args.every == 0]
 
-    model_options = torch.load(checkpoints[0][1], map_location="cpu", weights_only=True)["config"]["encoder"]
+    first_config = torch.load(checkpoints[0][1], map_location="cpu", weights_only=True)["config"]
+    model_options = first_config["encoder"]
+    mode = first_config.get("mode", "ema")
+    source = "encoder" if mode == "joint" else "target_encoder"
     image_size = model_options.get("image_size", 224)
     transform = transforms.Compose([
         transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
@@ -74,6 +77,9 @@ def main():
                     pooling="mean of full-image patch tokens after encoder final LayerNorm",
                     covariance="centered sample covariance of unnormalized pooled features",
                     singular_entropy="Shannon entropy of normalized singular values of centered features")
+    if mode == "joint":
+        settings.update(encoder_source=source, regularizer=first_config.get("regularizer", "none"),
+                        regularizer_weight=first_config.get("regularizer_weight", 0.0))
     settings_path = output / "settings.json"
     if settings_path.exists() and json.loads(settings_path.read_text(encoding="utf-8")) != settings:
         parser.error("output contains analysis with different settings; choose another --output")
@@ -98,9 +104,9 @@ def main():
             if epoch in completed:
                 continue
             checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-            if checkpoint["config"]["encoder"] != model_options:
-                raise ValueError(f"encoder architecture differs in {path}")
-            encoder.load_state_dict(checkpoint["target_encoder"], strict=True)
+            if checkpoint["config"]["encoder"] != model_options or checkpoint["config"].get("mode", "ema") != mode:
+                raise ValueError(f"encoder configuration differs in {path}")
+            encoder.load_state_dict(checkpoint[source], strict=True)
             statistics = evaluate_representation(encoder, loader, device, args.bf16)
             artifact = f"spectrum_{epoch}.pt"
             torch.save(statistics, output / artifact)
