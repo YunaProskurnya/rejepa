@@ -114,9 +114,10 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 контекста и полного изображения. В joint доступны `--regularizer none`,
 `sigreg` и `visreg`; по умолчанию выбран `sigreg`. Регуляризатор применяется
 к эмбеддингам каждой позиции патча по батчу, его вклад задаётся
-`--regularizer-weight` (по умолчанию `0.02` из ветки `reg`; значение не подбиралось для этих запусков).
-В [статье VISReg](https://arxiv.org/html/2606.02572) `0.02` относится к SIGReg,
-а для VISReg используются другие веса. Числа из статьи нельзя напрямую переносить:
+`--regularizer-weight` (по умолчанию `0.02`). Это значение взято из
+[сравнительного эксперимента статьи VISReg](https://arxiv.org/html/2606.02572),
+где оно используется для SIGReg; для VISReg авторы используют `0.6` на ImageNette
+и `0.9` на ImageNet-1K. Числа из статьи нельзя напрямую переносить:
 там loss смешивается как `(1−λ)·prediction + λ·regularization`, здесь —
 `prediction + regularizer_weight·regularization`.
 Режим и регуляризатор задаются этими CLI-параметрами или ключами `mode`,
