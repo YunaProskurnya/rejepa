@@ -107,6 +107,25 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
 Маски генерируются заново для каждого батча.
 
+## Режимы обучения и регуляризация
+
+`--mode ema` обучает encoder с замороженным target encoder, обновляемым через EMA.
+`--mode joint` использует один обучаемый encoder. Для joint задайте
+`--regularizer sigreg` или `visreg` и, при необходимости, `--regularizer-weight`.
+Те же параметры доступны в JSON как `mode`, `regularizer`, `regularizer_weight`.
+Конфиги на 600 эпох явно задают `ema` и `none`; для joint измените оба значения
+и укажите новый `output`.
+
+Вес по умолчанию `0.02` взят для SIGReg из [сравнения в статье VISReg](https://arxiv.org/html/2606.02572).
+Для VISReg авторы использовали другие веса. Их нельзя напрямую переносить на наш
+loss: у авторов `(1−λ)·prediction + λ·regularization`, у нас
+`prediction + regularizer_weight·regularization`.
+
+К команде запуска VM ниже для SIGReg добавьте `--mode joint --regularizer sigreg`
+и отдельный `--output`. Для VISReg замените `sigreg` на `visreg` и явно выберите вес.
+Режим и регуляризатор нельзя менять при продолжении запуска. Формулы описаны
+в [src/regularizers/README.md](src/regularizers/README.md).
+
 По умолчанию используется collator команды: `--collator custom`, реализация
 в `src/datasets/imagenet100.py`. Авторский вариант включается через
 `--collator reference`. Оба возвращают одинаковый формат батча, поэтому encoder,
@@ -187,8 +206,52 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ## Оценка представлений
 
+### Во время обучения
+
+При `representation_data` первая, каждая 25-я и последняя завершённая эпоха
+оцениваются на одной выборке. Для EMA берётся target encoder, для joint — общий
+encoder. Оба конфига на 600 эпох уже задают `"representation_data": "val"`.
+На VM запускайте из папки с `train/` и `val/`:
+
+```sh
+cd /home/container/shared/rejepa
+python /home/container/rejepa/scripts/train.py \
+  --config /home/container/rejepa/configs/imagenet100_vit_base_600ep_sk_container.json
+```
+
+Результаты: `representation_analysis/representations.csv`, `spectrum_N.pt` со
+спектром и `settings.json` с путями выбранных изображений. Размер выборки задаёт
+`--representation-samples` (по умолчанию 1024). При возобновлении строки не
+дублируются.
+
+### Анализ сохранённых эпох
+
+Готовые `checkpoint_N.pt` можно анализировать без процесса обучения и Comet.
+Для сравнения эпох используется фиксированный resize и center crop, а при
+обучении — случайный crop. Нормализация ImageNet общая. Patch tokens усредняются
+по изображению; из ковариации считаются спектр, его энтропия,
+`effective_rank = exp(entropy)` и средняя дисперсия. Ковариация не сохраняется.
+
+```sh
+cd /home/container/shared/rejepa
+python /home/container/rejepa/scripts/analyze_checkpoints.py \
+  --checkpoints runs/imagenet100-vit-base-600ep \
+  --data val \
+  --device cuda \
+  --bf16 \
+  --every 25
+```
+
+Без `--every` анализируются все checkpoint; `--every 25` выбирает первую,
+последнюю и каждую 25-ю эпоху. Повторный запуск перезаписывает CSV и выбранные
+спектры в `checkpoint_analysis/`, не затрагивая онлайн журнал. Для отдельного
+результата укажите `--output`. Низкий ранг и дисперсия могут
+указывать на коллапс, но не измеряют качество разделения классов.
+
+### kNN
+
 kNN проверяет, насколько хорошо классы разделяются в признаках замороженного
-**target encoder**. Его patch tokens усредняются в один вектор изображения и
+**target encoder** для EMA или общего **encoder** для joint. Его patch tokens усредняются в один вектор изображения и
 нормализуются. Для каждого изображения из val ищутся ближайшие по косинусной
 близости изображения из train; их метки голосуют за класс, с большим весом у
 более близких соседей. Отдельный классификатор не обучается.
