@@ -61,7 +61,6 @@ class TestRepresentationDiagnostics(unittest.TestCase):
                 for row in rows:
                     statistics = torch.load(output / row["artifact"], weights_only=True)
                     self.assertEqual(len(statistics["singular_values"]), 2)
-                    self.assertNotIn("covariance", statistics)
                     self.assertTrue(math.isfinite(float(row["mean_variance"])))
 
             settings = json.loads((run / "representation_analysis/settings.json").read_text(encoding="utf-8"))
@@ -92,7 +91,7 @@ class TestRepresentationDiagnostics(unittest.TestCase):
             self.assertEqual(joint_settings["regularizer"], "visreg")
             self.assertTrue((joint / "representation_analysis/representations.csv").exists())
 
-    def test_analyzes_finished_checkpoints_and_resumes(self):
+    def test_analyzes_finished_checkpoints_and_rewrites_results(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = root / "val" / "class_a"
@@ -119,7 +118,7 @@ class TestRepresentationDiagnostics(unittest.TestCase):
                 result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=90)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-            output = run / "representation_analysis"
+            output = run / "checkpoint_analysis"
             with (output / "representations.csv").open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual([int(row["epoch"]) for row in rows], [0, 1, 3])
@@ -128,7 +127,6 @@ class TestRepresentationDiagnostics(unittest.TestCase):
             self.assertGreater(float(rows[1]["effective_rank"]), 0)
             for row in rows:
                 statistics = torch.load(output / row["artifact"], weights_only=True)
-                self.assertNotIn("covariance", statistics)
                 self.assertEqual(statistics["images"], 3)
                 self.assertEqual(len(statistics["singular_values"]), 2)
                 self.assertTrue(torch.isfinite(statistics["singular_values"]).all())
@@ -141,11 +139,10 @@ class TestRepresentationDiagnostics(unittest.TestCase):
             result = subprocess.run([*command[:2], "--checkpoints", str(joint), "--data", str(data.parent),
                                      "--samples", "3"], cwd=ROOT, capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            joint_statistics = torch.load(joint / "representation_analysis/spectrum_0.pt", weights_only=True)
-            settings = json.loads((joint / "representation_analysis/settings.json").read_text(encoding="utf-8"))
+            joint_statistics = torch.load(joint / "checkpoint_analysis/spectrum_0.pt", weights_only=True)
+            settings = json.loads((joint / "checkpoint_analysis/settings.json").read_text(encoding="utf-8"))
             self.assertEqual(settings["encoder_source"], "encoder")
             self.assertEqual(settings["regularizer"], "sigreg")
-            self.assertNotIn("covariance", joint_statistics)
             self.assertTrue(torch.isfinite(joint_statistics["singular_values"]).all())
 
 

@@ -23,6 +23,7 @@ from PIL import ImageFilter
 from torchvision.utils import save_image
 
 logger = logging.getLogger(__name__)
+IMAGENET_NORMALIZE = dict(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
 
 def make_transform(crop_size=224, crop_scale=(0.3, 1.0), seed=0):
@@ -31,9 +32,18 @@ def make_transform(crop_size=224, crop_scale=(0.3, 1.0), seed=0):
     transform_list = [
         transforms.RandomResizedCrop(crop_size, scale=crop_scale),
         transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        transforms.Normalize(**IMAGENET_NORMALIZE),
     ]
     return transforms.Compose(transform_list)
+
+
+def make_evaluation_transform(image_size):
+    return transforms.Compose([
+        transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(**IMAGENET_NORMALIZE),
+    ])
 
 
 def process_image(image_path, image_size=224, patch_size=16, seed=0, device=None):

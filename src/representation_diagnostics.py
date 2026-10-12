@@ -1,7 +1,26 @@
+import csv
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets
+
+from .transforms import make_evaluation_transform
+
+
+CSV_FIELDS = ("epoch", "step", "images", "feature_dimension", "mean_variance",
+              "singular_entropy", "effective_rank", "artifact")
+
+
+def make_representation_loader(data, image_size, samples, seed, batch_size, device):
+    dataset = datasets.ImageFolder(data, transform=make_evaluation_transform(image_size))
+    indices = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(seed))[:samples].tolist()
+    paths = [str(Path(dataset.samples[index][0]).resolve()) for index in indices]
+    loader = DataLoader(Subset(dataset, indices), batch_size=batch_size,
+                        pin_memory=device.type == "cuda", generator=torch.Generator().manual_seed(seed))
+    return paths, loader
 
 
 def spectrum_statistics(features):
@@ -44,3 +63,15 @@ def evaluate_representation(encoder, loader, device, bf16):
             features.append(encoder(images.to(device, non_blocking=True)).float().mean(dim=1).cpu())
 
     return spectrum_statistics(torch.cat(features))
+
+
+def save_representation(output, epoch, step, statistics):
+    artifact = f"spectrum_{epoch}.pt"
+    torch.save(statistics, output / artifact)
+    row = {key: statistics[key] for key in CSV_FIELDS if key in statistics}
+    row.update(epoch=epoch, step=step, artifact=artifact)
+    with (output / "representations.csv").open("a", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS)
+        if stream.tell() == 0:
+            writer.writeheader()
+        writer.writerow(row)

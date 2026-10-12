@@ -6,12 +6,13 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
+from torchvision import datasets
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.models.encoder import VisionTransformer
+from src.transforms import make_evaluation_transform
 
 
 def select_per_class(dataset, class_names, count, generator):
@@ -133,13 +134,7 @@ def main():
     evaluated_name = "encoder" if mode == "joint" else "target_encoder"
     model_options = checkpoint["config"]["encoder"]
     initialization_seed = checkpoint["config"].get("seed", args.seed)
-    image_size = model_options.get("image_size", 224)
-    resize_size = int(image_size * 256 / 224)
-    transform = transforms.Compose([
-        transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BILINEAR),
-        transforms.CenterCrop(image_size), transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
+    transform = make_evaluation_transform(model_options["image_size"])
     train = datasets.ImageFolder(args.train, transform=transform)
     val = datasets.ImageFolder(args.val, transform=transform)
     if train.class_to_idx != val.class_to_idx:
@@ -162,7 +157,7 @@ def main():
     config.update(encoder=model_options, selected_classes=class_names,
                   mode=mode, evaluated_model=evaluated_name,
                   initialization_seed=initialization_seed,
-                  class_to_idx=train.class_to_idx, resize=resize_size, crop=image_size,
+                  class_to_idx=train.class_to_idx,
                   pooling="mean of patch tokens after encoder final LayerNorm, then L2 normalization",
                   effective_rank="entropy rank of centered normalized reference feature singular values",
                   checkpoint_step=checkpoint.get("step"), torch_version=str(torch.__version__))

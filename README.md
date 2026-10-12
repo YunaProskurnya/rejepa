@@ -109,34 +109,22 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 
 ## Режимы обучения и регуляризация
 
-`--mode ema` сохраняет базовое обучение: отдельный target encoder заморожен и
-обновляется через EMA. `--mode joint` использует один обучаемый encoder для
-контекста и полного изображения. В joint доступны `--regularizer none`,
-`sigreg` и `visreg`; по умолчанию выбран `sigreg`. Регуляризатор применяется
-к эмбеддингам каждой позиции патча по батчу, его вклад задаётся
-`--regularizer-weight` (по умолчанию `0.02`). Это значение взято из
-[сравнительного эксперимента статьи VISReg](https://arxiv.org/html/2606.02572),
-где оно используется для SIGReg; для VISReg авторы используют `0.6` на ImageNette
-и `0.9` на ImageNet-1K. Числа из статьи нельзя напрямую переносить:
-там loss смешивается как `(1−λ)·prediction + λ·regularization`, здесь —
+`--mode ema` обучает encoder с замороженным target encoder, обновляемым через EMA.
+`--mode joint` использует один обучаемый encoder. Для joint задайте
+`--regularizer sigreg` или `visreg` и, при необходимости, `--regularizer-weight`.
+Те же параметры доступны в JSON как `mode`, `regularizer`, `regularizer_weight`.
+Конфиги на 600 эпох явно задают `ema` и `none`; для joint измените оба значения
+и укажите новый `output`.
+
+Вес по умолчанию `0.02` взят для SIGReg из [сравнения в статье VISReg](https://arxiv.org/html/2606.02572).
+Для VISReg авторы использовали другие веса. Их нельзя напрямую переносить на наш
+loss: у авторов `(1−λ)·prediction + λ·regularization`, у нас
 `prediction + regularizer_weight·regularization`.
-Режим и регуляризатор задаются этими CLI-параметрами или ключами `mode`,
-`regularizer`, `regularizer_weight` в JSON-конфиге. В обоих конфигах на 600 эпох
-явно указаны `"mode": "ema"` и `"regularizer": "none"`. Для joint измените оба
-значения на `"joint"` и `"sigreg"` или `"visreg"` и задайте новый `output`.
 
-```sh
-python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container.json \
-  --mode joint --regularizer sigreg --representation-data val \
-  --output /home/container/shared/rejepa/runs/imagenet100-joint-sigreg
-```
-
-Для VISReg замените `sigreg` на `visreg`, явно выберите
-`--regularizer-weight` и другой `--output`.
-
-Joint checkpoint содержит обучаемый `encoder` без отдельного `target_encoder`.
-Режим и регуляризатор нельзя менять при продолжении запуска. Формулы
-регуляризаторов описаны в [src/regularizers/README.md](src/regularizers/README.md).
+К команде запуска VM ниже для SIGReg добавьте `--mode joint --regularizer sigreg`
+и отдельный `--output`. Для VISReg замените `sigreg` на `visreg` и явно выберите вес.
+Режим и регуляризатор нельзя менять при продолжении запуска. Формулы описаны
+в [src/regularizers/README.md](src/regularizers/README.md).
 
 По умолчанию используется collator команды: `--collator custom`, реализация
 в `src/datasets/imagenet100.py`. Авторский вариант включается через
@@ -218,15 +206,12 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ## Оценка представлений
 
-### Diagnostics during training
+### Во время обучения
 
-Pass `--representation-data` with an ImageFolder validation directory. During
-training, the first, every 25th, and final completed epochs are evaluated on the
-same images. EMA evaluates the target encoder; joint evaluates the shared encoder.
-Each evaluation appends a row to `representation_analysis/representations.csv`.
-`configs/imagenet100_vit_base_600ep.json` already sets `representation_data` to `val`.
-The VM container config also sets `representation_data` to `val`. Run it from
-the directory containing `train/` and `val/`, since those paths are relative:
+При `representation_data` первая, каждая 25-я и последняя завершённая эпоха
+оцениваются на одной выборке. Для EMA берётся target encoder, для joint — общий
+encoder. Оба конфига на 600 эпох уже задают `"representation_data": "val"`.
+На VM запускайте из папки с `train/` и `val/`:
 
 ```sh
 cd /home/container/shared/rejepa
@@ -234,45 +219,34 @@ python /home/container/rejepa/scripts/train.py \
   --config /home/container/rejepa/configs/imagenet100_vit_base_600ep_sk_container.json
 ```
 
-Use `--representation-samples` to change the sample size (default: 1024).
-The run also saves `spectrum_N.pt` with singular values and metrics, and
-`settings.json` with the selected image paths. Covariance is computed but not
-stored. Resuming training does not duplicate completed epochs in the CSV.
+Результаты: `representation_analysis/representations.csv`, `spectrum_N.pt` со
+спектром и `settings.json` с путями выбранных изображений. Размер выборки задаёт
+`--representation-samples` (по умолчанию 1024). При возобновлении строки не
+дублируются.
 
 ### Анализ сохранённых эпох
 
-После обучения можно сравнить представления из готовых `checkpoint_N.pt`:
-**target encoder** для EMA и обучаемого **encoder** для joint. Обучение и Comet
-для этого не нужны. Скрипт выбирает одни и те же
-изображения из ImageFolder, применяет детерминированные resize и center crop,
-усредняет patch tokens каждого изображения и считает ковариационную матрицу
-признаков. Энтропия вычисляется по нормированным сингулярным числам центрированной
-матрицы признаков; `effective_rank = exp(entropy)`. Низкие ранг и средняя дисперсия
-могут указывать на схлопывание представлений, но сами по себе не измеряют качество
-разделения классов.
+Готовые `checkpoint_N.pt` можно анализировать без процесса обучения и Comet.
+Для сравнения эпох используется фиксированный resize и center crop, а при
+обучении — случайный crop. Нормализация ImageNet общая. Patch tokens усредняются
+по изображению; из ковариации считаются спектр, его энтропия,
+`effective_rank = exp(entropy)` и средняя дисперсия. Ковариация не сохраняется.
 
 ```sh
-python scripts/analyze_checkpoints.py \
-  --checkpoints /home/container/shared/rejepa/runs/imagenet100-vit-base-600ep \
+cd /home/container/shared/rejepa
+python /home/container/rejepa/scripts/analyze_checkpoints.py \
+  --checkpoints runs/imagenet100-vit-base-600ep \
   --data val \
   --device cuda \
   --bf16 \
   --every 25
 ```
 
-Команду запускайте из корня репозитория на VM, заменив пути к папке с
-`checkpoint_N.pt` и к ImageFolder `val`, если они расположены иначе.
 Без `--every` анализируются все checkpoint; `--every 25` выбирает первую,
-последнюю и каждую 25-ю завершённую эпоху. Результаты появятся в
-`runs/imagenet100-vit-base-600ep/representation_analysis/`: таблица
-`representations.csv`, `spectrum_N.pt` и `settings.json`.
-Повторный запуск с теми же настройками пропускает уже обработанные эпохи.
-Для другого набора изображений или настроек укажите новую папку `--output`.
-Эффективный ранг ограничен `min(число изображений − 1, размерность признака)`;
-для ViT-B/16 с 768 признаками нужно хотя бы 769 изображений, чтобы увидеть
-полный возможный ранг.
-На сервере удобно запускать команду после завершения обучения в отдельной
-задаче GPU; от Comet и процесса обучения она не зависит.
+последнюю и каждую 25-ю эпоху. Повторный запуск перезаписывает CSV и выбранные
+спектры в `checkpoint_analysis/`, не затрагивая онлайн журнал. Для отдельного
+результата укажите `--output`. Низкий ранг и дисперсия могут
+указывать на коллапс, но не измеряют качество разделения классов.
 
 ### kNN
 

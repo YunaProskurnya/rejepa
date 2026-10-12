@@ -1,18 +1,15 @@
 import argparse
-import csv
 import json
 from pathlib import Path
 import sys
 
 import torch
-from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.models.encoder import VisionTransformer
-from src.representation_diagnostics import evaluate_representation
+from src.representation_diagnostics import evaluate_representation, make_representation_loader, save_representation
 
 
 def main():
@@ -53,71 +50,35 @@ def main():
     model_options = first_config["encoder"]
     mode = first_config.get("mode", "ema")
     source = "encoder" if mode == "joint" else "target_encoder"
-    image_size = model_options.get("image_size", 224)
-    transform = transforms.Compose([
-        transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
-        transforms.CenterCrop(image_size),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
-    dataset = datasets.ImageFolder(args.data, transform=transform)
-    if len(dataset) < 2:
+    paths, loader = make_representation_loader(args.data, model_options["image_size"], args.samples,
+                                               args.seed, args.batch_size, device)
+    if len(paths) < 2:
         parser.error("data must contain at least two images")
-    indices = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(args.seed))[
-        :args.samples
-    ].tolist()
-    loader = DataLoader(Subset(dataset, indices), batch_size=args.batch_size,
-                        shuffle=False, pin_memory=device.type == "cuda")
 
-    output = args.output or args.checkpoints / "representation_analysis"
-    settings = dict(checkpoints=str(args.checkpoints.resolve()), data=str(args.data.resolve()),
-                    paths=[str(Path(dataset.samples[index][0]).resolve()) for index in indices],
-                    encoder=model_options, device=str(device), bf16=args.bf16,
-                    batch_size=args.batch_size, every=args.every,
-                    pooling="mean of full-image patch tokens after encoder final LayerNorm",
-                    covariance="centered sample covariance of unnormalized pooled features",
-                    singular_entropy="Shannon entropy of normalized singular values of centered features")
+    output = args.output or args.checkpoints / "checkpoint_analysis"
+    settings = dict(checkpoints=str(args.checkpoints.resolve()), paths=paths,
+                    encoder_source=source, bf16=args.bf16, every=args.every)
     if mode == "joint":
-        settings.update(encoder_source=source, regularizer=first_config.get("regularizer", "none"),
-                        regularizer_weight=first_config.get("regularizer_weight", 0.0))
-    settings_path = output / "settings.json"
-    if settings_path.exists() and json.loads(settings_path.read_text(encoding="utf-8")) != settings:
-        parser.error("output contains analysis with different settings; choose another --output")
+        settings.update(regularizer=first_config["regularizer"],
+                        regularizer_weight=first_config["regularizer_weight"])
     output.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-
-    csv_path = output / "representations.csv"
-    fields = ["epoch", "step", "images", "feature_dimension", "mean_variance",
-              "singular_entropy", "effective_rank", "artifact"]
-    completed = set()
-    if csv_path.exists():
-        with csv_path.open(newline="", encoding="utf-8") as stream:
-            completed = {int(row["epoch"]) for row in csv.DictReader(stream)
-                         if (output / row["artifact"]).exists()}
+    (output / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    (output / "representations.csv").write_text("", encoding="utf-8")
 
     encoder = VisionTransformer(**model_options).to(device).eval()
-    with csv_path.open("a", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        if stream.tell() == 0:
-            writer.writeheader()
-        for epoch, path in checkpoints:
-            if epoch in completed:
-                continue
-            checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-            if checkpoint["config"]["encoder"] != model_options or checkpoint["config"].get("mode", "ema") != mode:
-                raise ValueError(f"encoder configuration differs in {path}")
-            encoder.load_state_dict(checkpoint[source], strict=True)
-            statistics = evaluate_representation(encoder, loader, device, args.bf16)
-            artifact = f"spectrum_{epoch}.pt"
-            torch.save(statistics, output / artifact)
-            row = {key: statistics[key] for key in fields if key in statistics}
-            row.update(epoch=epoch, step=checkpoint.get("step"), artifact=artifact)
-            writer.writerow(row)
-            stream.flush()
-            print(f"epoch {epoch + 1}: rank={statistics['effective_rank']:.2f} "
-                  f"entropy={statistics['singular_entropy']:.3f} "
-                  f"variance={statistics['mean_variance']:.6f}", flush=True)
-            del checkpoint
+    for epoch, path in checkpoints:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        config = checkpoint["config"]
+        if (config["encoder"] != model_options or config.get("mode", "ema") != mode or
+                mode == "joint" and (config.get("regularizer") != first_config.get("regularizer") or
+                                     config.get("regularizer_weight") != first_config.get("regularizer_weight"))):
+            raise ValueError(f"training configuration differs in {path}")
+        encoder.load_state_dict(checkpoint[source])
+        statistics = evaluate_representation(encoder, loader, device, args.bf16)
+        save_representation(output, epoch, checkpoint.get("step"), statistics)
+        print(f"epoch {epoch + 1}: rank={statistics['effective_rank']:.2f} "
+              f"entropy={statistics['singular_entropy']:.3f} "
+              f"variance={statistics['mean_variance']:.6f}", flush=True)
     print(f"Saved analysis to {output.resolve()}", flush=True)
 
 
