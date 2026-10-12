@@ -22,6 +22,7 @@ from src.linear_probe_final import evaluate_final_linear_probe, make_final_probe
 from src.models.encoder import VisionTransformer
 from src.tracking import start_tracker
 from src.config import parse_config_args
+from src.linear_probe_report import summary_paths, write_probe_summary
 
 
 def load_selected_recipe(path):
@@ -117,6 +118,8 @@ def parse_args(argv=None, *, selected_only=False):
         args.probe_lr = 1e-3
     if args.output.exists():
         parser.error("output already exists; choose a new JSON path")
+    if args.mode == 'final' and any(path.exists() for path in summary_paths(args.output)):
+        parser.error('summary already exists; choose a new JSON path')
     if min(args.batch_size, args.probe_epochs, args.probe_batch_size) <= 0 or args.num_workers < 0:
         parser.error("batch sizes/epochs must be positive; num-workers must be nonnegative")
     if args.probe_lr is not None and not 0 < args.probe_lr < float("inf"):
@@ -208,6 +211,11 @@ def run_evaluation(resources, argv=None, *, selected_only=False):
     else:
         tracker.log_metrics(metrics, prefix="linear_monitor_checkpoint/", step=step, epoch=epoch)
     tracker.log_asset(args.output)
+    if args.mode == 'final':
+        for path in write_probe_summary(args.output, metrics, dict(
+                checkpoint=str(args.checkpoint.resolve()), epochs=args.probe_epochs,
+                batch_size=args.probe_batch_size, seed=args.seed)):
+            tracker.log_asset(path)
     print(json.dumps(metrics.get("best", metrics), indent=2), flush=True)
     if args.mode == "final":
         if len(metrics['trials']) == 1:

@@ -152,7 +152,57 @@ python scripts/evaluate_linear.py --mode final \
 Если train меньше 16384 изображений, уменьшите `--probe-batch-size`.
 Comet использует прежний эксперимент, если рядом с итоговым JSON есть `comet.json`.
 
-**Один выбранный вариант вместо повторного перебора:**
+**Повторные итоговые оценки без проходов encoder:**
+
+В [configs/linear_probe_cached.json](configs/linear_probe_cached.json) укажите
+`checkpoint`, `train`, `val`, `cache` и `output` для своего сервера. Один конфиг
+используется для двух команд:
+
+```sh
+# Один раз для конкретного checkpoint: сохранить признаки 50 случайных crop/flip
+# каждого train-изображения, а также фиксированные признаки train/val для оценки.
+python scripts/prepare_linear_cache.py --config configs/linear_probe_cached.json
+
+# Повторно: только обучение голов LARS и оценка по сохранённым признакам.
+python scripts/evaluate_linear_cached.py --config configs/linear_probe_cached.json
+```
+
+Эпоха 1 читает первый набор, эпоха 2 — второй и т.д., в сохранённом порядке.
+Изображения, checkpoint и encoder второй команде не нужны: источник признаков и
+классы берутся из `cache/manifest.json`. `seed` при оценке задаёт инициализацию голов;
+seed аугментаций зафиксирован в кэше. Для нового checkpoint нужен новый кэш.
+Кэш хранит FP32 без дополнительного округления: около **82 ГБ** для ViT-B,
+130 тысяч train-изображений, 50 эпох и оценочных train/val. Картинки-кропы не сохраняются.
+Чтение идёт порциями через mmap: весь кэш не загружается в RAM или GPU.
+
+Подготовка требует тех же 50 проходов encoder; экономия появляется при повторных
+оценках. Используется тот же перебор **24 голов** (12 для encoder с менее чем
+четырьмя блоками), LARS и расписание LR. Головы используют общие признаки, однако
+их обучение тоже занимает время. `probe_batch_size` и `epochs` можно изменить
+при оценке (эпох не больше подготовленных); это меняет протокол относительно
+исходного запуска. Для эквивалентного сравнения оставьте seed, батч и число эпох одинаковыми.
+Инициализация голов теперь имеет отдельный RNG: перебор голов не меняет будущие
+аугментации. Протокол прежний, но результаты старой версии при том же seed могут отличаться.
+
+Кэш не перезаписывается; незавершённая подготовка без `manifest.json` не принимается.
+Автоматического продолжения подготовки пока нет. После прерывания выберите новую
+папку или вручную удалите неполную. Сохраняйте кэш в `runs/` или `data/`, исключённых из Git.
+Для повторной оценки задайте новый `output`, например `--output runs/my-run/probe_repeat.json`.
+
+Результаты обеих итоговых оценок (с кэшем и обычной):
+
+| Файл рядом с `output.json` | Содержимое |
+| --- | --- |
+| `output.best.md` | Краткий читаемый отчёт: лучшая голова, параметры, train/val accuracy и loss |
+| `output.best.json` | Только лучший результат и краткие настройки запуска |
+| `output.trials.csv` | Таблица всех вариантов |
+| `output.json` | Полный отчёт с протоколом |
+
+Лучший вариант выбирается по val top-1, при равенстве — по меньшему val loss.
+Метрики всех голов и файлы результатов отправляются в Comet при `comet: true`;
+сам большой кэш туда не загружается. Лучший результат также выводится в терминал.
+
+**Один выбранный вариант без дискового кэша:**
 
 Отредактируйте [configs/linear_probe_selected.json](configs/linear_probe_selected.json):
 `checkpoint`, `train`, `val`, `output` задают пути для вашего сервера.
@@ -248,6 +298,7 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 | `src/models/` | Encoder, predictor, target encoder и EMA |
 | `src/train_step.py`, `src/optimizer.py`, `src/losses.py` | Шаг обучения, AdamW и loss |
 | `src/linear_probe.py`, `src/linear_probe_final.py` | Реализации оценки; CLI — `scripts/evaluate_linear.py`, один выбранный вариант — `scripts/evaluate_linear_selected.py` |
+| `src/linear_probe_cache.py` | Кэш признаков на диске; команды — `scripts/prepare_linear_cache.py` и `scripts/evaluate_linear_cached.py` |
 | `src/datasets/`, `src/reference/` | Collator команды и авторские компоненты |
 | `src/config.py`, `src/tracking.py` | Чтение настроек и Comet |
 | `example/`, `tests/` | Учебные примеры и проверки |

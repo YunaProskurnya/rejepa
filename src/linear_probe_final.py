@@ -134,12 +134,18 @@ def _make_trials(features, num_classes, device, batch_size, learning_rates, weig
 
 @torch.no_grad()
 def _score_trials(encoder, trials, loader, num_classes, device, precision, use_last4):
+    batches = ((_pooled_features(encoder, images, device, precision, use_last4), targets)
+               for images, targets in loader)
+    return _score_feature_trials(trials, batches, num_classes, device)
+
+
+@torch.no_grad()
+def _score_feature_trials(trials, batches, num_classes, device):
     totals = [dict(loss=0.0, correct=0) for _ in trials]
     count = 0
     for trial in trials:
         trial['_head'].eval()
-    for images, targets in loader:
-        features = _pooled_features(encoder, images, device, precision, use_last4)
+    for features, targets in batches:
         targets = _labels(targets, num_classes).to(device)
         values = {name: value.to(device) for name, value in features.items()}
         count += len(targets)
@@ -159,7 +165,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                                 num_classes, device, *, epochs=50, batch_size=16384,
                                 seed=0, precision='fp32', learning_rates=(0.01, 0.05, 0.001),
                                 weight_decays=(0.0005, 0.0), progress=None,
-                                representations=None, heads=('linear', 'batchnorm_linear')):
+                                representations=None, heads=('linear', 'batchnorm_linear'),
+                                feature_cache=None):
     """Fit fresh independent probes with shared encoder passes and report final scores.
 
     The training loader must draw fresh random crops. The two scoring loaders must
@@ -179,11 +186,15 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         raise ValueError('weight_decays must contain nonnegative finite values')
     if precision not in ('fp32', 'bf16'):
         raise ValueError('precision must be fp32 or bf16')
-    if len(train_loader.dataset) < batch_size:
+    train_images = (feature_cache.metadata['train_images'] if feature_cache is not None
+                    else len(train_loader.dataset))
+    if train_images < batch_size:
         raise ValueError('final probe training dataset is smaller than the effective head batch; '
                          'choose an explicit smaller batch_size for a reduced-data experiment')
     device = torch.device(device)
-    supports_last4 = (hasattr(encoder, 'get_intermediate_layers') and
+    supports_last4 = ('last4' in feature_cache.metadata['representations']
+                     if feature_cache is not None else
+                     hasattr(encoder, 'get_intermediate_layers') and
                      len(getattr(encoder, 'blocks', ())) >= 4)
     representations = tuple(representations) if representations is not None else (
         ('last', 'last4') if supports_last4 else ('last',))
@@ -195,7 +206,13 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
     if 'last4' in representations and not supports_last4:
         raise ValueError('last4 requires an encoder with at least four blocks')
     use_last4 = 'last4' in representations
-    modes = [(module, module.training) for module in encoder.modules()]
+    if feature_cache is not None:
+        if epochs > feature_cache.metadata['epochs']:
+            raise ValueError('requested epochs exceed the prepared feature cache')
+        if num_classes != feature_cache.metadata['num_classes']:
+            raise ValueError('num_classes does not match feature cache')
+        precision = feature_cache.metadata['precision']
+    modes = [(module, module.training) for module in encoder.modules()] if encoder is not None else []
     python_state, numpy_state = random.getstate(), np.random.get_state()
     generators = _loader_generators((train_loader, train_eval_loader, val_loader))
     generator_states = [(generator, generator.get_state()) for generator in generators]
@@ -210,7 +227,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
             np.random.seed(seed % (2**32))
             for generator in generators:
                 generator.manual_seed(seed)
-            encoder.eval()
+            if encoder is not None:
+                encoder.eval()
             for epoch in range(epochs):
                 epoch_started = time.perf_counter()
                 for trial in trials:
@@ -218,13 +236,22 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                         group['lr'] = trial['lr'] * 0.1 ** (epoch // 15)
                 batches = 0
                 stats = {'images': 0}
-                for features, targets in _feature_batches(
-                    encoder, train_loader, device, precision, use_last4, batch_size, num_classes,
-                    stats,
-                ):
+                if feature_cache is None:
+                    batches_source = _feature_batches(
+                        encoder, train_loader, device, precision, use_last4, batch_size,
+                        num_classes, stats)
+                else:
+                    stats['images'] = train_images
+                    batches_source = feature_cache.batches(f'train_{epoch + 1:04d}', batch_size,
+                                                           drop_last=True)
+                for features, targets in batches_source:
                     if not trials:
-                        trials = _make_trials(features, num_classes, device, batch_size,
-                                              learning_rates, weight_decays, representations, heads)
+                        # Head initialization must not consume the augmentation RNG.
+                        # This also makes online and cached evaluation use identical heads.
+                        with torch.random.fork_rng():
+                            torch.manual_seed(seed)
+                            trials = _make_trials(features, num_classes, device, batch_size,
+                                                  learning_rates, weight_decays, representations, heads)
                     values = {name: value.to(device) for name, value in features.items()}
                     targets = targets.to(device)
                     for trial in trials:
@@ -243,10 +270,17 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                 if progress is not None:
                     progress(dict(epoch=epoch + 1, epochs=epochs, steps=batches,
                                   seconds=time.perf_counter() - epoch_started))
-            train_scores = _score_trials(encoder, trials, train_eval_loader, num_classes,
-                                         device, precision, use_last4)
-            val_scores = _score_trials(encoder, trials, val_loader, num_classes,
-                                       device, precision, use_last4)
+            if feature_cache is None:
+                train_scores = _score_trials(encoder, trials, train_eval_loader, num_classes,
+                                             device, precision, use_last4)
+                val_scores = _score_trials(encoder, trials, val_loader, num_classes,
+                                           device, precision, use_last4)
+            else:
+                scoring_batch = feature_cache.metadata['extraction_batch_size']
+                train_scores = _score_feature_trials(trials, feature_cache.batches('train_eval', scoring_batch),
+                                                     num_classes, device)
+                val_scores = _score_feature_trials(trials, feature_cache.batches('val', scoring_batch),
+                                                   num_classes, device)
             if device.type == 'cuda':
                 torch.cuda.synchronize(device)
     finally:
@@ -274,10 +308,11 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         lr_decay_factor=0.1, warmup_epochs=0, momentum=0.9, trust_coefficient=0.001,
         batchnorm_affine=True, batchnorm_eps=1e-5, batchnorm_momentum=0.1,
         linear_initialization='torch.nn.Linear default', precision=precision, seed=seed,
+        head_initialization_rng='isolated torch RNG seeded with seed; does not advance crop RNG',
         transform_repr={
-            'train': repr(getattr(train_loader.dataset, 'transform', None)),
-            'train_eval': repr(getattr(train_eval_loader.dataset, 'transform', None)),
-            'val': repr(getattr(val_loader.dataset, 'transform', None)),
+            'train': repr(getattr(getattr(train_loader, 'dataset', None), 'transform', None)),
+            'train_eval': repr(getattr(getattr(train_eval_loader, 'dataset', None), 'transform', None)),
+            'val': repr(getattr(getattr(val_loader, 'dataset', None), 'transform', None)),
         },
         feature_pooling='arithmetic mean over spatial patch tokens',
         last4_combination=('concatenate pooled features from the last four blocks, '
@@ -312,5 +347,14 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                'this implementation uses MAE LARS exclusions for all parameters with ndim <= 1. '
                'The paper grid takes precedence over the different grid in the public VISSL preset.',
     )
+    if feature_cache is not None:
+        protocol.update(feature_cache=str(feature_cache.path.resolve()),
+                        feature_cache_metadata=feature_cache.metadata,
+                        transform_repr=feature_cache.metadata['transforms'],
+                        encoder_norm_type=feature_cache.metadata['encoder_norm_type'],
+                        encoder_norm_eps=feature_cache.metadata['encoder_norm_eps'],
+                        encoder_passes_during_evaluation=0,
+                        fresh_training_augmentations=False,
+                        training_augmentations='distinct precomputed random crop/flip per image per epoch')
     return dict(best=dict(best), trials=results, protocol=protocol,
                 probe_seconds=time.perf_counter() - started)
