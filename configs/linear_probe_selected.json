@@ -1,0 +1,21 @@
+{
+  "mode": "final",
+  "checkpoint": "runs/imagenet100-vit-base-370ep-batch128/checkpoint.pt",
+  "train": "data/imagenet100/train",
+  "val": "data/imagenet100/val",
+  "output": "runs/imagenet100-vit-base-370ep-batch128/linear_selected.json",
+  "representation": "last4",
+  "head": "batchnorm_linear",
+  "reference_lr": 0.05,
+  "weight_decay": 0.0,
+  "probe_epochs": 50,
+  "probe_batch_size": 16384,
+  "batch_size": 128,
+  "device": "cuda",
+  "precision": "bf16",
+  "num_workers": 4,
+  "seed": 0,
+  "comet": true,
+  "comet_workspace": "superustam",
+  "comet_project": "rejepa"
+}
