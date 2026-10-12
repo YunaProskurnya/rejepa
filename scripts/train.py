@@ -71,7 +71,12 @@ def parse_args(argv=None):
     parser.add_argument("--ema-end", type=float, default=1.0)
     parser.add_argument("--representation-data", type=Path)
     parser.add_argument("--representation-samples", type=int, default=1024)
+    parser.add_argument("--mode", choices=("ema", "joint"), default="ema")
+    parser.add_argument("--regularizer", choices=("none", "sigreg", "visreg"))
+    parser.add_argument("--regularizer-weight", type=float, default=0.02)
     args = parse_config_args(parser, argv)
+    if args.regularizer is None:
+        args.regularizer = "sigreg" if args.mode == "joint" else "none"
     if (args.data is not None) == args.smoke_test:
         parser.error("choose exactly one of --data or --smoke-test (in JSON or on the command line)")
     if args.epochs <= 0 or args.batch_size <= 0 or args.num_workers < 0:
@@ -92,6 +97,12 @@ def parse_args(argv=None):
         parser.error("EMA must satisfy 0 <= ema-start <= ema-end <= 1")
     if args.representation_data is not None and args.representation_samples < 2:
         parser.error("representation-samples must be at least 2")
+    if not math.isfinite(args.regularizer_weight) or args.regularizer_weight < 0:
+        parser.error("regularizer-weight must be finite and nonnegative")
+    if args.mode == "ema" and args.regularizer != "none":
+        parser.error("regularization requires joint mode")
+    if args.mode == "joint" and args.regularizer != "none" and args.batch_size < 2:
+        parser.error("joint regularization requires batch-size >= 2")
     if any(not 0 <= value < float("inf") for value in (
         args.lr, args.start_lr, args.final_lr, args.weight_decay, args.final_weight_decay,
     )):
@@ -184,11 +195,12 @@ def main():
                              predictor_embed_dim=predictor_dim,
                              depth=predictor_depth, num_heads=num_heads, **transformer_options)
     predictor = VisionTransformerPredictor(**predictor_options).to(device)
-    target_encoder = create_target_encoder(encoder)
+    target_encoder = create_target_encoder(encoder) if args.mode == "ema" else None
     optimizer = create_optimizer(encoder, predictor, lr=args.lr, weight_decay=args.weight_decay)
     encoder.train()
     predictor.train()
-    target_encoder.train()
+    if target_encoder is not None:
+        target_encoder.train()
 
     representation_loader = None
     if args.representation_data is not None:
@@ -238,8 +250,10 @@ def main():
                        no_decay="parameter name contains 'bias' or parameter.ndim == 1"),
         objective=dict(loss="smooth_l1", beta=1.0, reduction="mean per block, then mean across blocks",
                        target_normalization="layer_norm over features", target_norm_eps=1e-5,
-                       target_update="EMA after optimizer.step", gradient_clipping=None),
-        schedules=dict(lr="warmup_cosine", weight_decay="cosine", ema="linear",
+                       target_update="EMA after optimizer.step" if args.mode == "ema" else "joint shared encoder",
+                       gradient_clipping=None),
+        schedules=dict(lr="warmup_cosine", weight_decay="cosine",
+                       ema="linear" if args.mode == "ema" else "none",
                        unit="optimizer update", warmup_steps=args.warmup_epochs * updates_per_epoch,
                        total_steps=total_steps),
         architecture=dict(position_embedding="fixed_2d_sincos", layer_norm_eps=1e-6,
@@ -251,6 +265,12 @@ def main():
         versions=dict(python=sys.version.split()[0], torchvision=str(torchvision.__version__),
                       numpy=np.__version__, pillow=PIL.__version__),
     )
+    if args.mode == "joint":
+        config["objective"].update(
+            regularizer=args.regularizer, regularizer_weight=args.regularizer_weight,
+            regularizer_input="full-image encoder patch embeddings before target normalization",
+            regularizer_reduction="mean over patch positions after regularizing across batch",
+        )
     for key in ("data", "output", "resume", "config"):
         value = getattr(args, key)
         if value is not None:
@@ -267,11 +287,12 @@ def main():
             "encoder", "predictor", "masks", "model", "dataset", "data", "smoke_test", "collator",
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
             "precision", "lr", "start_lr", "final_lr", "warmup_epochs", "weight_decay",
-            "final_weight_decay", "ema_start", "ema_end", "total_steps",
-            "representation_data", "representation_samples",
+            "final_weight_decay", "ema_start", "ema_end", "mode", "regularizer",
+            "regularizer_weight", "total_steps", "representation_data", "representation_samples",
             "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
-        defaults = dict(representation_data=None, representation_samples=1024)
+        defaults = dict(mode="ema", regularizer="none", regularizer_weight=0.02,
+                        representation_data=None, representation_samples=1024)
         differences = [key for key in compatible
                        if checkpoint["config"].get(key, defaults.get(key)) != config.get(key)]
         if differences:
@@ -280,7 +301,8 @@ def main():
             parser.error("checkpoint lacks resume progress; use a checkpoint from this launcher version")
         encoder.load_state_dict(checkpoint["encoder"])
         predictor.load_state_dict(checkpoint["predictor"])
-        target_encoder.load_state_dict(checkpoint["target_encoder"])
+        if target_encoder is not None:
+            target_encoder.load_state_dict(checkpoint["target_encoder"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         step = checkpoint["step"]
         next_epoch = checkpoint["next_epoch"]
@@ -309,7 +331,7 @@ def main():
         representation_settings = dict(
             checkpoints=str(args.output.resolve()), data=str(args.representation_data.resolve()),
             paths=representation_paths, encoder=model_options, device=str(device),
-            bf16=args.precision == "bf16", batch_size=32, every=1,
+            bf16=args.precision == "bf16", batch_size=32, every=25,
             pooling="mean of full-image patch tokens after encoder final LayerNorm",
             covariance="centered sample covariance of unnormalized pooled features",
             singular_entropy="Shannon entropy of normalized singular values of centered features",
@@ -338,16 +360,19 @@ def main():
     def save_checkpoint(completed_epoch=None):
         numpy_state = np.random.get_state()
         temporary = args.output / "checkpoint.tmp"
-        torch.save({
+        checkpoint = {
             "encoder": encoder.state_dict(), "predictor": predictor.state_dict(),
-            "target_encoder": target_encoder.state_dict(), "optimizer": optimizer.state_dict(),
+            "optimizer": optimizer.state_dict(),
             "step": step, "epoch": next_epoch + int(next_batch > 0), "config": config,
             "next_epoch": next_epoch, "next_batch": next_batch, "microbatches_seen": microbatches_seen,
             "lr_schedule_step": lr_schedule._step, "wd_schedule_step": wd_schedule._step,
             "torch_rng_state": torch.get_rng_state(), "python_rng_state": random.getstate(),
             "numpy_rng_state": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
             "cuda_rng_states": torch.cuda.get_rng_state_all() if device.type == "cuda" else [],
-        }, temporary)
+        }
+        if target_encoder is not None:
+            checkpoint["target_encoder"] = target_encoder.state_dict()
+        torch.save(checkpoint, temporary)
         temporary.replace(args.output / "checkpoint.pt")
 
         if completed_epoch is not None:
@@ -370,7 +395,8 @@ def main():
         completed_representations = {int(row["epoch"]) for row in previous_representations}
 
     def record_representation(epoch):
-        if representation_loader is None or epoch in completed_representations:
+        if (representation_loader is None or epoch in completed_representations or
+                epoch != 0 and (epoch + 1) % 25 != 0 and epoch != args.epochs - 1):
             return
         representation_encoder = encoder if config.get("mode") == "joint" else target_encoder
         representation_encoder.eval()
@@ -397,7 +423,8 @@ def main():
         record_representation(next_epoch - 1)
 
     fieldnames = [
-        "step", "epoch", "loss", "grad_norm", "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
+        "step", "epoch", "loss", "prediction_loss", "regularization_loss", "grad_norm",
+        "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
         "images", "step_seconds", "images_per_second", "steady_images_per_second", "eta_seconds",
         "cuda_peak_memory_mb", "elapsed_seconds", "warmup",
     ]
@@ -445,8 +472,11 @@ def main():
                 group_size = min(args.accumulation_steps, batches_per_epoch - batch_index)
                 lr = lr_schedule.step()
                 weight_decay = wd_schedule.step()
-                momentum = args.ema_start + (args.ema_end - args.ema_start) * step / total_steps
+                momentum = (args.ema_start + (args.ema_end - args.ema_start) * step / total_steps
+                            if args.mode == "ema" else None)
                 loss_sum = 0.0
+                prediction_sum = 0.0
+                regularization_sum = 0.0
                 context_sum = 0.0
                 target_sum = 0.0
                 for microstep in range(group_size):
@@ -459,8 +489,12 @@ def main():
                         images, context_indices, target_indices, momentum,
                         precision=args.precision, accumulation_steps=group_size,
                         zero_grad=microstep == 0, update=microstep == group_size - 1,
+                        mode=args.mode, regularizer=args.regularizer,
+                        regularizer_weight=args.regularizer_weight,
                     )
                     loss_sum += metrics["loss"]
+                    prediction_sum += metrics.get("prediction_loss", metrics["loss"])
+                    regularization_sum += metrics.get("regularization_loss", 0.0)
                     context_sum += context_indices.shape[1]
                     target_sum += target_indices[0].shape[1]
                 if device.type == "cuda":
@@ -482,7 +516,10 @@ def main():
                     (args.epochs - next_epoch) * batches_per_epoch - next_batch
                 ) * args.batch_size
                 row = dict(
-                    step=step, epoch=epoch + 1, loss=loss_sum / group_size, grad_norm=metrics["grad_norm"],
+                    step=step, epoch=epoch + 1, loss=loss_sum / group_size,
+                    prediction_loss=prediction_sum / group_size,
+                    regularization_loss=regularization_sum / group_size,
+                    grad_norm=metrics["grad_norm"],
                     lr=lr, weight_decay=weight_decay, momentum=momentum,
                     context_tokens=context_sum / group_size, target_tokens=target_sum / group_size,
                     images=update_images, step_seconds=seconds, images_per_second=update_images / seconds,
@@ -498,8 +535,11 @@ def main():
                 experiment.log_metrics({key: value for key, value in row.items() if value is not None},
                                        step=step, epoch=epoch + 1)
                 print(f"step={step} epoch={epoch + 1} loss={row['loss']:.6f} "
+                      f"prediction={row['prediction_loss']:.6f} regularization={row['regularization_loss']:.6f} "
                       f"context={row['context_tokens']:g} target={row['target_tokens']:g} "
-                      f"lr={lr:.6g} ema={momentum:.6f} seconds={seconds:.3f} "
+                      f"lr={lr:.6g} "
+                      f"{'ema=' + format(momentum, '.6f') if momentum is not None else 'mode=joint'} "
+                      f"seconds={seconds:.3f} "
                       f"images/s={row['images_per_second']:.1f} warmup={warmup} "
                       f"cuda_mb={row['cuda_peak_memory_mb']:.0f}", flush=True)
                 if step % args.checkpoint_every == 0:
@@ -520,8 +560,10 @@ def main():
         print(f"Steady throughput excluding {args.benchmark_warmup} warmup updates and checkpoint writes: "
               f"{measured_images / measured_seconds:.2f} images/s", flush=True)
     print(f"Saved configuration, metrics and checkpoint to {args.output.resolve()}", flush=True)
-    log_model(experiment, {"encoder": encoder.state_dict(), "predictor": predictor.state_dict(),
-                           "target_encoder": target_encoder.state_dict()}, model_name="rejepa")
+    model_state = {"encoder": encoder.state_dict(), "predictor": predictor.state_dict()}
+    if target_encoder is not None:
+        model_state["target_encoder"] = target_encoder.state_dict()
+    log_model(experiment, model_state, model_name="rejepa")
     experiment.end()
 
 

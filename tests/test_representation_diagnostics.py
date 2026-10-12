@@ -31,7 +31,7 @@ class TestRepresentationDiagnostics(unittest.TestCase):
         self.assertEqual(collapsed["singular_entropy"], 0)
         self.assertEqual(collapsed["effective_rank"], 0)
 
-    def test_training_records_each_finished_epoch_and_resumes(self):
+    def test_training_records_selected_epochs_and_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = root / "val" / "class_a"
@@ -41,9 +41,9 @@ class TestRepresentationDiagnostics(unittest.TestCase):
 
             run = root / "run"
             command = [sys.executable, str(ROOT / "tests/run_training.py"), "--smoke-test",
-                       "--epochs", "2", "--representation-data", str(data.parent),
+                       "--epochs", "3", "--representation-data", str(data.parent),
                        "--representation-samples", "3", "--output", str(run)]
-            for steps, expected in ((3, []), (4, [0]), (8, [0, 1])):
+            for steps, expected in ((3, []), (4, [0]), (8, [0]), (12, [0, 2])):
                 arguments = [*command, "--max-steps", str(steps)]
                 if steps > 3:
                     arguments.extend(("--resume", str(run / "checkpoint.pt")))
@@ -66,10 +66,11 @@ class TestRepresentationDiagnostics(unittest.TestCase):
 
             settings = json.loads((run / "representation_analysis/settings.json").read_text(encoding="utf-8"))
             self.assertEqual(len(settings["paths"]), 3)
+            self.assertEqual(settings["every"], 25)
 
             baseline = root / "baseline"
             result = subprocess.run([sys.executable, str(ROOT / "tests/run_training.py"), "--smoke-test",
-                                     "--epochs", "2", "--max-steps", "8", "--output", str(baseline)],
+                                     "--epochs", "3", "--max-steps", "12", "--output", str(baseline)],
                                     cwd=ROOT, capture_output=True, text=True, timeout=90)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             checkpoint = torch.load(run / "checkpoint.pt", weights_only=True)
@@ -77,6 +78,19 @@ class TestRepresentationDiagnostics(unittest.TestCase):
             for component in ("encoder", "predictor", "target_encoder"):
                 for name, value in checkpoint[component].items():
                     torch.testing.assert_close(value, reference[component][name], rtol=0, atol=0)
+
+            joint = root / "joint"
+            result = subprocess.run([sys.executable, str(ROOT / "tests/run_training.py"), "--smoke-test",
+                                     "--mode", "joint", "--regularizer", "visreg", "--epochs", "1",
+                                     "--representation-data", str(data.parent), "--output", str(joint)],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            joint_checkpoint = torch.load(joint / "checkpoint.pt", weights_only=True)
+            self.assertNotIn("target_encoder", joint_checkpoint)
+            joint_settings = json.loads((joint / "representation_analysis/settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(joint_settings["encoder_source"], "encoder")
+            self.assertEqual(joint_settings["regularizer"], "visreg")
+            self.assertTrue((joint / "representation_analysis/representations.csv").exists())
 
     def test_analyzes_finished_checkpoints_and_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:

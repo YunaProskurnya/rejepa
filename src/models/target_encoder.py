@@ -1,6 +1,7 @@
 """Создание target encoder и EMA для текущего ViT без изменяемых буферов."""
 
 import copy
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -15,8 +16,7 @@ def create_target_encoder(encoder):
     return target_encoder
 
 
-@torch.no_grad()
-def prepare_targets(target_encoder, images, target_indices):
+def prepare_targets(target_encoder, images, target_indices, *, joint=False, return_features=False):
     """Полное изображение -> нормализованные цели [B,Nt,D]"""
     multiple = isinstance(target_indices, list)
     blocks = target_indices if multiple else [target_indices]
@@ -27,10 +27,12 @@ def prepare_targets(target_encoder, images, target_indices):
             raise ValueError("target_indices must have shape [B,Nt]")
         if indices.numel() == 0:
             raise ValueError("batch and target blocks must be nonempty")
-    features = target_encoder(images)
-    features = F.layer_norm(features, (features.shape[-1],), eps=1e-5)
-    targets = [select_tokens(features, indices) for indices in blocks]
-    return targets if multiple else targets[0]
+    with nullcontext() if joint else torch.no_grad():
+        features = target_encoder(images)
+        normalized = F.layer_norm(features, (features.shape[-1],), eps=1e-5)
+        targets = [select_tokens(normalized, indices) for indices in blocks]
+    targets = targets if multiple else targets[0]
+    return (targets, features) if return_features else targets
 
 
 @torch.no_grad()

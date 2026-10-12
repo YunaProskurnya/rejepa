@@ -107,6 +107,29 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
 Маски генерируются заново для каждого батча.
 
+## Режимы обучения и регуляризация
+
+`--mode ema` сохраняет базовое обучение: отдельный target encoder заморожен и
+обновляется через EMA. `--mode joint` использует один обучаемый encoder для
+контекста и полного изображения. В joint доступны `--regularizer none`,
+`sigreg` и `visreg`; по умолчанию выбран `sigreg`. Регуляризатор применяется
+к эмбеддингам каждой позиции патча по батчу, его вклад задаётся
+`--regularizer-weight` (по умолчанию `0.02`).
+Режим и регуляризатор задаются этими CLI-параметрами или ключами `mode`,
+`regularizer`, `regularizer_weight` в JSON-конфиге. Без них используется EMA.
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container.json \
+  --mode joint --regularizer sigreg --representation-data val \
+  --output /home/container/shared/rejepa/runs/imagenet100-joint-sigreg
+```
+
+Для VISReg замените `sigreg` на `visreg` и выберите другой `--output`.
+
+Joint checkpoint содержит обучаемый `encoder` без отдельного `target_encoder`.
+Режим и регуляризатор нельзя менять при продолжении запуска. Формулы
+регуляризаторов описаны в [src/regularizers/README.md](src/regularizers/README.md).
+
 По умолчанию используется collator команды: `--collator custom`, реализация
 в `src/datasets/imagenet100.py`. Авторский вариант включается через
 `--collator reference`. Оба возвращают одинаковый формат батча, поэтому encoder,
@@ -189,18 +212,19 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ### Diagnostics during training
 
-Pass `--representation-data` with an ImageFolder validation directory. After each
-completed epoch, training evaluates the target encoder on the same images and
-appends a row to `representation_analysis/representations.csv`.
+Pass `--representation-data` with an ImageFolder validation directory. During
+training, the first, every 25th, and final completed epochs are evaluated on the
+same images. EMA evaluates the target encoder; joint evaluates the shared encoder.
+Each evaluation appends a row to `representation_analysis/representations.csv`.
 `configs/imagenet100_vit_base_600ep.json` already sets `representation_data` to `val`.
-Use `--representation-samples` to change the sample size (default: 1024).
-For other configs, run:
+For the VM container config, run:
 
 ```sh
-python scripts/train.py --config configs/imagenet100_vit_base.json \
-  --representation-data data/imagenet100/val
+python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container.json \
+  --representation-data val
 ```
 
+Use `--representation-samples` to change the sample size (default: 1024).
 The run also saves `spectrum_N.pt` with singular values and metrics, and
 `settings.json` with the selected image paths. Covariance is computed but not
 stored. Resuming training does not duplicate completed epochs in the CSV.
@@ -243,7 +267,7 @@ python scripts/analyze_checkpoints.py \
 ### kNN
 
 kNN проверяет, насколько хорошо классы разделяются в признаках замороженного
-**target encoder**. Его patch tokens усредняются в один вектор изображения и
+**target encoder** для EMA или общего **encoder** для joint. Его patch tokens усредняются в один вектор изображения и
 нормализуются. Для каждого изображения из val ищутся ближайшие по косинусной
 близости изображения из train; их метки голосуют за класс, с большим весом у
 более близких соседей. Отдельный классификатор не обучается.

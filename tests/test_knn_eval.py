@@ -1,3 +1,9 @@
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import types
 import unittest
 
@@ -7,6 +13,38 @@ from scripts.evaluate_knn import feature_statistics, select_per_class, weighted_
 
 
 class TestKnnEvaluation(unittest.TestCase):
+    def test_joint_checkpoint_is_evaluated_with_shared_encoder(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            checkpoint_dir = folder / "run"
+            training = subprocess.run(
+                [sys.executable, str(root / "tests/run_training.py"), "--smoke-test", "--mode", "joint",
+                 "--max-steps", "1", "--output", str(checkpoint_dir)],
+                cwd=root, capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(training.returncode, 0, training.stdout + training.stderr)
+
+            for split in ("train", "val"):
+                for name in ("a", "b"):
+                    destination = folder / split / name
+                    destination.mkdir(parents=True)
+                    shutil.copyfile(root / "example/lenna.png", destination / "image.png")
+
+            output = folder / "knn.json"
+            evaluation = subprocess.run(
+                [sys.executable, str(root / "scripts/evaluate_knn.py"),
+                 "--checkpoint", str(checkpoint_dir / "checkpoint.pt"),
+                 "--train", str(folder / "train"), "--val", str(folder / "val"),
+                 "--reference-per-class", "1", "--queries-per-class", "1", "--k", "1",
+                 "--compare-random", "--output", str(output)],
+                cwd=root, capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(evaluation.returncode, 0, evaluation.stdout + evaluation.stderr)
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result["config"]["evaluated_model"], "encoder")
+            self.assertEqual(set(result["metrics"]), {"encoder", "random_encoder"})
+
     def test_chunked_cosine_knn_handles_noncontiguous_class_ids(self):
         reference = torch.tensor([[1., 0.], [3., 0.], [0., 2.], [0., 1.]])
         labels = torch.tensor([3, 3, 9, 9])
