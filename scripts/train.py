@@ -15,6 +15,7 @@ import numpy as np
 import PIL
 import torch
 import torchvision
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,7 @@ from src.optimizer import create_optimizer
 from src.reference.multiblock import MaskCollator as ReferenceMaskCollator
 from src.datasets.imagenet100 import MaskCollator as CustomMaskCollator, make_data_loader
 from src.reference.schedulers import CosineWDSchedule, WarmupCosineSchedule
+from src.representation_diagnostics import evaluate_representation
 from src.train_step import train_step
 
 
@@ -67,6 +69,8 @@ def parse_args(argv=None):
     parser.add_argument("--final-weight-decay", type=float, default=0.4)
     parser.add_argument("--ema-start", type=float, default=0.996)
     parser.add_argument("--ema-end", type=float, default=1.0)
+    parser.add_argument("--representation-data", type=Path)
+    parser.add_argument("--representation-samples", type=int, default=1024)
     args = parse_config_args(parser, argv)
     if (args.data is not None) == args.smoke_test:
         parser.error("choose exactly one of --data or --smoke-test (in JSON or on the command line)")
@@ -86,6 +90,8 @@ def parse_args(argv=None):
         parser.error("warmup-epochs must be nonnegative and less than epochs")
     if not 0 <= args.ema_start <= args.ema_end <= 1:
         parser.error("EMA must satisfy 0 <= ema-start <= ema-end <= 1")
+    if args.representation_data is not None and args.representation_samples < 2:
+        parser.error("representation-samples must be at least 2")
     if any(not 0 <= value < float("inf") for value in (
         args.lr, args.start_lr, args.final_lr, args.weight_decay, args.final_weight_decay,
     )):
@@ -184,6 +190,26 @@ def main():
     predictor.train()
     target_encoder.train()
 
+    representation_loader = None
+    if args.representation_data is not None:
+        image_size = model_options["image_size"]
+        representation_transform = transforms.Compose([
+            transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ])
+        representation_dataset = datasets.ImageFolder(args.representation_data, transform=representation_transform)
+        if len(representation_dataset) < 2:
+            parser.error("representation-data must contain at least two images")
+        indices = torch.randperm(len(representation_dataset), generator=torch.Generator().manual_seed(args.seed))[
+            :args.representation_samples
+        ].tolist()
+        representation_paths = [str(Path(representation_dataset.samples[index][0]).resolve()) for index in indices]
+        representation_loader = DataLoader(Subset(representation_dataset, indices), batch_size=32,
+                                           shuffle=False, pin_memory=device.type == "cuda",
+                                           generator=torch.Generator().manual_seed(args.seed))
+
     total_steps = args.epochs * updates_per_epoch
     lr_schedule = WarmupCosineSchedule(
         optimizer, warmup_steps=args.warmup_epochs * updates_per_epoch,
@@ -242,9 +268,12 @@ def main():
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
             "precision", "lr", "start_lr", "final_lr", "warmup_epochs", "weight_decay",
             "final_weight_decay", "ema_start", "ema_end", "total_steps",
+            "representation_data", "representation_samples",
             "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
-        differences = [key for key in compatible if checkpoint["config"].get(key) != config.get(key)]
+        defaults = dict(representation_data=None, representation_samples=1024)
+        differences = [key for key in compatible
+                       if checkpoint["config"].get(key, defaults.get(key)) != config.get(key)]
         if differences:
             parser.error("resume configuration differs: " + ", ".join(differences))
         if "next_batch" not in checkpoint:
@@ -273,10 +302,31 @@ def main():
         parser.error("output already exists; choose a new directory or pass --resume")
     if args.output.exists() and args.resume and (args.output / "config.json").exists():
         previous_config = json.loads((args.output / "config.json").read_text(encoding="utf-8"))
-        if any(previous_config.get(key) != config.get(key) for key in compatible):
+        if any(previous_config.get(key, defaults.get(key)) != config.get(key) for key in compatible):
             parser.error("existing output directory belongs to an incompatible run")
+    representation_output = args.output / "representation_analysis"
+    if representation_loader is not None:
+        representation_settings = dict(
+            checkpoints=str(args.output.resolve()), data=str(args.representation_data.resolve()),
+            paths=representation_paths, encoder=model_options, device=str(device),
+            bf16=args.precision == "bf16", batch_size=32, every=1,
+            pooling="mean of full-image patch tokens after encoder final LayerNorm",
+            covariance="centered sample covariance of unnormalized pooled features",
+            singular_entropy="Shannon entropy of normalized singular values of centered features",
+        )
+        if config.get("mode") == "joint":
+            representation_settings.update(
+                encoder_source="encoder", regularizer=config["regularizer"],
+                regularizer_weight=config["regularizer_weight"],
+            )
+        settings_path = representation_output / "settings.json"
+        if settings_path.exists() and json.loads(settings_path.read_text(encoding="utf-8")) != representation_settings:
+            parser.error("representation analysis settings differ; choose another --output")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    if representation_loader is not None:
+        representation_output.mkdir(exist_ok=True)
+        settings_path.write_text(json.dumps(representation_settings, indent=2), encoding="utf-8")
     experiment = start(api_key=os.environ["COMET_API_KEY"], project_name="rejepa", workspace="superustam")
     experiment.log_parameters(config)
     if args.smoke_test:
@@ -303,6 +353,48 @@ def main():
         if completed_epoch is not None:
             shutil.copyfile(args.output / "checkpoint.pt", temporary)
             temporary.replace(args.output / f"checkpoint_{completed_epoch}.pt")
+
+    representation_csv = representation_output / "representations.csv"
+    representation_fields = ["epoch", "step", "images", "feature_dimension", "mean_variance",
+                             "singular_entropy", "effective_rank", "artifact"]
+    completed_representations = set()
+    if representation_loader is not None and args.resume and representation_csv.exists():
+        with representation_csv.open(newline="", encoding="utf-8") as stream:
+            previous_representations = [row for row in csv.DictReader(stream)
+                                        if int(row["epoch"]) < next_epoch
+                                        and (representation_output / row["artifact"]).exists()]
+        with representation_csv.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=representation_fields)
+            writer.writeheader()
+            writer.writerows(previous_representations)
+        completed_representations = {int(row["epoch"]) for row in previous_representations}
+
+    def record_representation(epoch):
+        if representation_loader is None or epoch in completed_representations:
+            return
+        representation_encoder = encoder if config.get("mode") == "joint" else target_encoder
+        representation_encoder.eval()
+        try:
+            statistics = evaluate_representation(representation_encoder, representation_loader, device,
+                                                 args.precision == "bf16")
+        finally:
+            representation_encoder.train()
+        artifact = f"spectrum_{epoch}.pt"
+        torch.save(statistics, representation_output / artifact)
+        row = {key: statistics[key] for key in representation_fields if key in statistics}
+        row.update(epoch=epoch, step=step, artifact=artifact)
+        with representation_csv.open("a", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=representation_fields)
+            if stream.tell() == 0:
+                writer.writeheader()
+            writer.writerow(row)
+        completed_representations.add(epoch)
+        print(f"epoch {epoch + 1}: rank={statistics['effective_rank']:.2f} "
+              f"entropy={statistics['singular_entropy']:.3f} "
+              f"variance={statistics['mean_variance']:.6f}", flush=True)
+
+    if args.resume and next_epoch > 0 and next_batch == 0:
+        record_representation(next_epoch - 1)
 
     fieldnames = [
         "step", "epoch", "loss", "grad_norm", "lr", "weight_decay", "momentum", "context_tokens", "target_tokens",
@@ -416,8 +508,11 @@ def main():
                     stop = True
                     stop_reason = "max-steps reached"
                     break
-            save_checkpoint(completed_epoch=epoch if next_epoch == epoch + 1 and next_batch == 0 else None)
+            finished_epoch = next_epoch == epoch + 1 and next_batch == 0
+            save_checkpoint(completed_epoch=epoch if finished_epoch else None)
             del iterator
+            if finished_epoch:
+                record_representation(epoch)
         if session_updates == 0:
             save_checkpoint()
     print(f"Stopped: {stop_reason}", flush=True)

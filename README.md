@@ -187,17 +187,38 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ## Оценка представлений
 
-### Анализ сохранённых эпох
+### Диагностика во время обучения
 
-После обучения можно сравнить представления из готовых `checkpoint_N.pt`:
-**target encoder** для EMA и обучаемого **encoder** для joint. Обучение и Comet
-для этого не нужны. Скрипт выбирает одни и те же
-изображения из ImageFolder, применяет детерминированные resize и center crop,
+Передайте в обучение `--representation-data` с путём к ImageFolder `val`.
+После каждой полностью завершённой эпохи скрипт оценит **target encoder** на
+одних и тех же изображениях и сразу запишет `representation_analysis/representations.csv`.
+Конфиг `configs/imagenet100_vit_base_600ep.json` уже включает `representation_data: val`.
+Число изображений задаётся через `--representation-samples` (по умолчанию 1024).
+Для других конфигов запуск выглядит так:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base.json \
+  --representation-data data/imagenet100/val
+```
+
+Скрипт выбирает одни и те же изображения из ImageFolder, применяет
+детерминированные resize и center crop,
 усредняет patch tokens каждого изображения и считает ковариационную матрицу
 признаков. Энтропия вычисляется по нормированным сингулярным числам центрированной
 матрицы признаков; `effective_rank = exp(entropy)`. Низкие ранг и средняя дисперсия
 могут указывать на схлопывание представлений, но сами по себе не измеряют качество
 разделения классов.
+
+В папке запуска сохраняются `representation_analysis/representations.csv` для графиков,
+`representation_analysis/spectrum_N.pt` с сингулярными числами и метриками,
+`representation_analysis/settings.json` со списком выбранных изображений.
+Ковариационная матрица используется для расчёта, но не сохраняется.
+При продолжении обучения готовые эпохи не дублируются в CSV.
+
+### Анализ готовых чекпойнтов
+
+Если обучение уже прошло без онлайн-диагностики, те же показатели можно получить
+из `checkpoint_N.pt` без повторного обучения:
 
 ```sh
 python scripts/analyze_checkpoints.py \
@@ -211,9 +232,7 @@ python scripts/analyze_checkpoints.py \
 Без `--every` анализируются все checkpoint; `--every 25` выбирает первую,
 последнюю и каждую 25-ю завершённую эпоху. Результаты появятся в
 `runs/imagenet100-vit-base-600ep/representation_analysis/`: таблица
-`representations.csv` для графиков, `spectrum_N.pt` с сингулярными числами и
-метриками, `settings.json` со списком выбранных изображений и регуляризатором
-для joint-запуска. Ковариационная матрица используется для расчёта, но не сохраняется.
+`representations.csv`, `spectrum_N.pt` и `settings.json`.
 Повторный запуск с теми же настройками пропускает уже обработанные эпохи.
 Для другого набора изображений или настроек укажите новую папку `--output`.
 Эффективный ранг ограничен `min(число изображений − 1, размерность признака)`;

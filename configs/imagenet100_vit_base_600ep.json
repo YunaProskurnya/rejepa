@@ -1,5 +1,6 @@
 {
   "data": "train",
+  "representation_data": "val",
   "dataset": "imagefolder",
   "output": "runs/imagenet100-vit-base-600ep",
   "collator": "custom",

@@ -31,6 +31,53 @@ class TestRepresentationDiagnostics(unittest.TestCase):
         self.assertEqual(collapsed["singular_entropy"], 0)
         self.assertEqual(collapsed["effective_rank"], 0)
 
+    def test_training_records_each_finished_epoch_and_resumes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "val" / "class_a"
+            data.mkdir(parents=True)
+            for index, color in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255))):
+                Image.new("RGB", (40, 40), color).save(data / f"{index}.png")
+
+            run = root / "run"
+            command = [sys.executable, str(ROOT / "tests/run_training.py"), "--smoke-test",
+                       "--epochs", "2", "--representation-data", str(data.parent),
+                       "--representation-samples", "3", "--output", str(run)]
+            for steps, expected in ((3, []), (4, [0]), (8, [0, 1])):
+                arguments = [*command, "--max-steps", str(steps)]
+                if steps > 3:
+                    arguments.extend(("--resume", str(run / "checkpoint.pt")))
+                result = subprocess.run(arguments, cwd=ROOT, capture_output=True, text=True, timeout=90)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+                output = run / "representation_analysis"
+                if not expected:
+                    self.assertFalse((output / "representations.csv").exists())
+                    continue
+                with (output / "representations.csv").open(newline="", encoding="utf-8") as stream:
+                    rows = list(csv.DictReader(stream))
+                self.assertEqual([int(row["epoch"]) for row in rows], expected)
+                self.assertEqual([int(row["step"]) for row in rows], [4 * (epoch + 1) for epoch in expected])
+                for row in rows:
+                    statistics = torch.load(output / row["artifact"], weights_only=True)
+                    self.assertEqual(len(statistics["singular_values"]), 2)
+                    self.assertNotIn("covariance", statistics)
+                    self.assertTrue(math.isfinite(float(row["mean_variance"])))
+
+            settings = json.loads((run / "representation_analysis/settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(settings["paths"]), 3)
+
+            baseline = root / "baseline"
+            result = subprocess.run([sys.executable, str(ROOT / "tests/run_training.py"), "--smoke-test",
+                                     "--epochs", "2", "--max-steps", "8", "--output", str(baseline)],
+                                    cwd=ROOT, capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            checkpoint = torch.load(run / "checkpoint.pt", weights_only=True)
+            reference = torch.load(baseline / "checkpoint.pt", weights_only=True)
+            for component in ("encoder", "predictor", "target_encoder"):
+                for name, value in checkpoint[component].items():
+                    torch.testing.assert_close(value, reference[component][name], rtol=0, atol=0)
+
     def test_analyzes_finished_checkpoints_and_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
