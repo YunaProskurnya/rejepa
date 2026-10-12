@@ -108,11 +108,14 @@ def _feature_batches(encoder, loader, device, precision, use_last4, batch_size, 
                 chunks, target_chunks, count = {}, [], 0
 
 
-def _make_trials(features, num_classes, device, batch_size, learning_rates, weight_decays):
+def _make_trials(features, num_classes, device, batch_size, learning_rates, weight_decays,
+                 representations, heads):
     trials = []
     for representation, values in features.items():
+        if representation not in representations:
+            continue
         dimension = values.shape[1]
-        for head_name in ('linear', 'batchnorm_linear'):
+        for head_name in heads:
             for reference_lr in learning_rates:
                 for weight_decay in weight_decays:
                     linear = nn.Linear(dimension, num_classes)
@@ -155,7 +158,8 @@ def _score_trials(encoder, trials, loader, num_classes, device, precision, use_l
 def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_loader,
                                 num_classes, device, *, epochs=50, batch_size=16384,
                                 seed=0, precision='fp32', learning_rates=(0.01, 0.05, 0.001),
-                                weight_decays=(0.0005, 0.0), progress=None):
+                                weight_decays=(0.0005, 0.0), progress=None,
+                                representations=None, heads=('linear', 'batchnorm_linear')):
     """Fit fresh independent probes with shared encoder passes and report final scores.
 
     The training loader must draw fresh random crops. The two scoring loaders must
@@ -179,8 +183,18 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         raise ValueError('final probe training dataset is smaller than the effective head batch; '
                          'choose an explicit smaller batch_size for a reduced-data experiment')
     device = torch.device(device)
-    use_last4 = (hasattr(encoder, 'get_intermediate_layers') and
-                 len(getattr(encoder, 'blocks', ())) >= 4)
+    supports_last4 = (hasattr(encoder, 'get_intermediate_layers') and
+                     len(getattr(encoder, 'blocks', ())) >= 4)
+    representations = tuple(representations) if representations is not None else (
+        ('last', 'last4') if supports_last4 else ('last',))
+    heads = tuple(heads)
+    if not representations or any(name not in ('last', 'last4') for name in representations):
+        raise ValueError('representations must contain last or last4')
+    if not heads or any(name not in ('linear', 'batchnorm_linear') for name in heads):
+        raise ValueError('heads must contain linear or batchnorm_linear')
+    if 'last4' in representations and not supports_last4:
+        raise ValueError('last4 requires an encoder with at least four blocks')
+    use_last4 = 'last4' in representations
     modes = [(module, module.training) for module in encoder.modules()]
     python_state, numpy_state = random.getstate(), np.random.get_state()
     generators = _loader_generators((train_loader, train_eval_loader, val_loader))
@@ -210,7 +224,7 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                 ):
                     if not trials:
                         trials = _make_trials(features, num_classes, device, batch_size,
-                                              learning_rates, weight_decays)
+                                              learning_rates, weight_decays, representations, heads)
                     values = {name: value.to(device) for name, value in features.items()}
                     targets = targets.to(device)
                     for trial in trials:
@@ -255,8 +269,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         name='ijepa_final_linear', epochs=epochs, optimizer='MAE LARS',
         effective_batch_size=batch_size, reference_batch_size=256,
         learning_rates=list(learning_rates), weight_decays=list(weight_decays),
-        representations=['last', 'last4'] if use_last4 else ['last'],
-        heads=['linear', 'batchnorm_linear'], lr_decay_epochs=[15, 30, 45],
+        representations=list(representations),
+        heads=list(heads), lr_decay_epochs=[15, 30, 45],
         lr_decay_factor=0.1, warmup_epochs=0, momentum=0.9, trust_coefficient=0.001,
         batchnorm_affine=True, batchnorm_eps=1e-5, batchnorm_momentum=0.1,
         linear_initialization='torch.nn.Linear default', precision=precision, seed=seed,
@@ -275,8 +289,10 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         encoder_norm_type=type(encoder_norm).__name__ if encoder_norm is not None else None,
         encoder_norm_eps=float(encoder_norm.eps) if hasattr(encoder_norm, 'eps') else None,
         accuracy_unit='percent', scoring_epoch=epochs,
-        best_selection='highest final validation top1, then lowest final validation '
-                       'cross-entropy; remaining ties keep trial grid order',
+        best_selection=('fixed recipe; no hyperparameter selection on this validation set'
+                        if len(results) == 1 else
+                        'highest final validation top1, then lowest final validation '
+                        'cross-entropy; remaining ties keep trial grid order'),
         optimizer_steps_per_epoch=epoch_batches,
         optimized_images_per_epoch=[steps * batch_size for steps in epoch_batches],
         dropped_images_per_epoch=dropped_images,

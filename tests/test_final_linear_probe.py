@@ -131,6 +131,72 @@ class TestFinalLinearProbe(unittest.TestCase):
         self.assertTrue(all(trial['val_images'] == 9 for trial in result['trials']))
         self.assertAlmostEqual(result['trials'][0]['lr'], 0.05 * 4 / 256)
 
+    def test_fixed_recipe_trains_exactly_one_head_and_reports_its_protocol(self):
+        for representation in ('last', 'last4'):
+            encoder = ToyEncoder(depth=4)
+            result = evaluate(encoder, loaders(), representations=(representation,),
+                              heads=('batchnorm_linear',))
+            self.assertEqual(len(result['trials']), 1)
+            self.assertEqual(result['best'], result['trials'][0])
+            self.assertEqual(result['best']['representation'], representation)
+            self.assertEqual(result['best']['head'], 'batchnorm_linear')
+            self.assertEqual(result['best']['feature_dim'], 2 if representation == 'last' else 8)
+            self.assertEqual(result['protocol']['representations'], [representation])
+            self.assertEqual(result['protocol']['heads'], ['batchnorm_linear'])
+            self.assertIn('fixed recipe', result['protocol']['best_selection'])
+            self.assertEqual(result['best']['train_images'], 9)
+            self.assertEqual(result['best']['val_images'], 9)
+
+    def test_selected_last_avoids_last4_and_invalid_last4_fails_early(self):
+        encoder = ToyEncoder(depth=4)
+        original = encoder.get_intermediate_layers
+        with patch.object(encoder, 'get_intermediate_layers', wraps=original) as forward:
+            evaluate(encoder, loaders(), representations=('last',), heads=('linear',))
+            self.assertTrue(all(call.kwargs['n'] == 1 for call in forward.call_args_list))
+        shallow = ToyEncoder(depth=1)
+        with self.assertRaisesRegex(ValueError, 'at least four blocks'):
+            evaluate(shallow, loaders(), representations=('last4',))
+        self.assertEqual(shallow.calls, 0)
+
+    def test_selected_cli_reads_recipe_and_allows_explicit_duration_override(self):
+        from scripts.evaluate_linear import parse_args, load_selected_recipe
+        report = {'config': {'protocol': {'name': 'ijepa_final_linear', 'epochs': 50,
+                                          'effective_batch_size': 16384}},
+                  'metrics': {'best': {'representation': 'last4', 'head': 'batchnorm_linear',
+                                       'reference_lr': 0.05, 'weight_decay': 0.0005,
+                                       'val_top1': 64.7}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'previous.json'
+            path.write_text(json.dumps(report))
+            arguments = ['--checkpoint', 'model.pt', '--train', 'train', '--val', 'val',
+                         '--output', str(Path(temporary) / 'new.json'), '--best-from', str(path)]
+            _, args = parse_args(arguments, selected_only=True)
+            self.assertEqual(args.probe_epochs, 50)
+            self.assertEqual(args.probe_batch_size, 16384)
+            self.assertEqual(args.selected_recipe['learning_rates'], [0.05])
+            self.assertNotIn('val_top1', args.selected_recipe)
+            _, changed = parse_args([*arguments, '--probe-epochs', '2', '--probe-batch-size', '4'],
+                                    selected_only=True)
+            self.assertEqual((changed.probe_epochs, changed.probe_batch_size), (2, 4))
+            report['metrics']['best']['reference_lr'] = float('nan')
+            path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, 'finite'):
+                load_selected_recipe(path)
+
+    def test_selected_config_and_cli_overrides(self):
+        from scripts.evaluate_linear import parse_args
+        config_path = Path(__file__).resolve().parents[1] / 'configs/linear_probe_selected.json'
+        with tempfile.TemporaryDirectory() as temporary:
+            output = str(Path(temporary) / 'result.json')
+            _, args = parse_args(['--config', str(config_path), '--output', output,
+                                  '--train', temporary, '--no-comet'], selected_only=True)
+            self.assertEqual(args.train, Path(temporary))
+            self.assertEqual(args.output, Path(output))
+            self.assertFalse(args.comet)
+            self.assertEqual(args.selected_recipe, dict(representations=['last4'],
+                             heads=['batchnorm_linear'], learning_rates=[0.05], weight_decays=[0.0]))
+            self.assertEqual((args.probe_epochs, args.probe_batch_size), (50, 16384))
+
     def test_last4_concatenation_keeps_each_layer_and_runs_encoder_once(self):
         encoder = ToyEncoder(depth=4)
         images = torch.tensor([[1.0, 2.0], [3.0, 4.0]])

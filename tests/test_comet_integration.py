@@ -231,6 +231,27 @@ class TestCometIntegration(unittest.TestCase):
                 torch.testing.assert_close(weights[component][name], tensor, rtol=0, atol=0)
                 self.assertEqual(weights[component][name].device.type, "cpu")
 
+        selected_output = tracked / "linear_selected.json"
+        selected_config = self.root / "probe_config.json"
+        recipe = {name: final_result['metrics']['best'][name]
+                  for name in ('representation', 'head', 'reference_lr', 'weight_decay')}
+        selected_config.write_text(json.dumps(dict(
+            checkpoint=str(tracked / 'final_weights.pt'), train=str(self.root / 'train'),
+            val=str(self.root / 'val'), output=str(selected_output),
+            probe_epochs=1, probe_batch_size=2, batch_size=2, seed=17, **recipe,
+        )))
+        self.launch("scripts/evaluate_linear_selected.py", "--config", selected_config, *comet)
+        selected = json.loads(selected_output.read_text())
+        self.assertEqual(len(selected["metrics"]["trials"]), 1)
+        for name in ("representation", "head", "reference_lr", "weight_decay"):
+            self.assertEqual(selected["metrics"]["best"][name], final_result["metrics"]["best"][name])
+        self.assertEqual(selected["config"]["protocol"]["epochs"], 1)
+        self.assertEqual(selected["config"]["protocol"]["effective_batch_size"], 2)
+        self.assertEqual(selected["metrics"]["best"]["val_images"], 4)
+        self.assertEqual([event for event in self.events() if event["kind"] == "start"][-1]["mode"], "get")
+        self.assertTrue(any(event["kind"] == "asset" and event["path"] == str(selected_output)
+                            for event in self.events()))
+
     def test_inactive_sdk_fails_before_training_and_closes_experiment(self):
         self.env["FAKE_COMET_DISABLED"] = "1"
         output = self.root / "failed"

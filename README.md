@@ -152,6 +152,29 @@ python scripts/evaluate_linear.py --mode final \
 Если train меньше 16384 изображений, уменьшите `--probe-batch-size`.
 Comet использует прежний эксперимент, если рядом с итоговым JSON есть `comet.json`.
 
+**Один выбранный вариант вместо повторного перебора:**
+
+Отредактируйте [configs/linear_probe_selected.json](configs/linear_probe_selected.json):
+`checkpoint`, `train`, `val`, `output` задают пути для вашего сервера.
+В конфиге уже выбран рецепт: `last4`, `batchnorm_linear`, reference LR `0.05`, weight decay `0`.
+
+```sh
+python scripts/evaluate_linear_selected.py --config configs/linear_probe_selected.json
+```
+
+`probe_epochs: 50` — эпохи головы; `probe_batch_size: 16384` — её батч;
+`batch_size: 128` — порция изображений для encoder. Фактический LR равен
+`reference_lr × probe_batch_size / 256` (здесь `3.2`). CLI переопределяет JSON,
+относительные пути считаются от рабочей папки; команды выполняйте из корня проекта.
+Предыдущий отчёт с метриками не нужен. На новом checkpoint заново обучается одна
+голова и рассчитываются train/val loss и top-1. Для сравнения checkpoint сохраняйте
+одинаковый рецепт. Полная фактическая конфигурация записывается в выходной JSON.
+Альтернатива: без явного рецепта укажите `--best-from <предыдущий linear_final.json>`
+и пути через CLI — тогда настройки головы, её эпохи и батч будут взяты из отчёта.
+Это убирает перебор голов, но сохраняет проход encoder на каждой эпохе с новыми crops:
+ускорение не будет 24-кратным, поскольку и раньше головы делили общие проходы encoder.
+Для дешёвых промежуточных оценок используйте `--mode monitor` ниже.
+
 <details>
 <summary>Дополнительно: лёгкий probe для checkpoint и kNN</summary>
 
@@ -224,7 +247,7 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 | `scripts/` | Команды подготовки данных, обучения и оценки checkpoint |
 | `src/models/` | Encoder, predictor, target encoder и EMA |
 | `src/train_step.py`, `src/optimizer.py`, `src/losses.py` | Шаг обучения, AdamW и loss |
-| `src/linear_probe.py`, `src/linear_probe_final.py` | Реализации лёгкой и итоговой оценки; CLI — `scripts/evaluate_linear.py` |
+| `src/linear_probe.py`, `src/linear_probe_final.py` | Реализации оценки; CLI — `scripts/evaluate_linear.py`, один выбранный вариант — `scripts/evaluate_linear_selected.py` |
 | `src/datasets/`, `src/reference/` | Collator команды и авторские компоненты |
 | `src/config.py`, `src/tracking.py` | Чтение настроек и Comet |
 | `example/`, `tests/` | Учебные примеры и проверки |
