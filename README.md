@@ -114,9 +114,15 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 контекста и полного изображения. В joint доступны `--regularizer none`,
 `sigreg` и `visreg`; по умолчанию выбран `sigreg`. Регуляризатор применяется
 к эмбеддингам каждой позиции патча по батчу, его вклад задаётся
-`--regularizer-weight` (по умолчанию `0.02`).
+`--regularizer-weight` (по умолчанию `0.02` из ветки `reg`; значение не подбиралось для этих запусков).
+В [статье VISReg](https://arxiv.org/html/2606.02572) `0.02` относится к SIGReg,
+а для VISReg используются другие веса. Числа из статьи нельзя напрямую переносить:
+там loss смешивается как `(1−λ)·prediction + λ·regularization`, здесь —
+`prediction + regularizer_weight·regularization`.
 Режим и регуляризатор задаются этими CLI-параметрами или ключами `mode`,
-`regularizer`, `regularizer_weight` в JSON-конфиге. Без них используется EMA.
+`regularizer`, `regularizer_weight` в JSON-конфиге. В обоих конфигах на 600 эпох
+явно указаны `"mode": "ema"` и `"regularizer": "none"`. Для joint измените оба
+значения на `"joint"` и `"sigreg"` или `"visreg"` и задайте новый `output`.
 
 ```sh
 python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container.json \
@@ -124,7 +130,8 @@ python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container
   --output /home/container/shared/rejepa/runs/imagenet100-joint-sigreg
 ```
 
-Для VISReg замените `sigreg` на `visreg` и выберите другой `--output`.
+Для VISReg замените `sigreg` на `visreg`, явно выберите
+`--regularizer-weight` и другой `--output`.
 
 Joint checkpoint содержит обучаемый `encoder` без отдельного `target_encoder`.
 Режим и регуляризатор нельзя менять при продолжении запуска. Формулы

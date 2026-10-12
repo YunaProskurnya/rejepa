@@ -5,6 +5,8 @@
   "output": "runs/imagenet100-vit-base-600ep",
   "collator": "custom",
   "model": "vit_base",
+  "mode": "ema",
+  "regularizer": "none",
   "device": "cuda",
   "precision": "bf16",
   "batch_size": 128,
