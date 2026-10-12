@@ -187,44 +187,43 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ## Оценка представлений
 
-### Диагностика во время обучения
+### Diagnostics during training
 
-Передайте в обучение `--representation-data` с путём к ImageFolder `val`.
-После каждой полностью завершённой эпохи скрипт оценит **target encoder** на
-одних и тех же изображениях и сразу запишет `representation_analysis/representations.csv`.
-Конфиг `configs/imagenet100_vit_base_600ep.json` уже включает `representation_data: val`.
-Число изображений задаётся через `--representation-samples` (по умолчанию 1024).
-Для других конфигов запуск выглядит так:
+Pass `--representation-data` with an ImageFolder validation directory. After each
+completed epoch, training evaluates the target encoder on the same images and
+appends a row to `representation_analysis/representations.csv`.
+`configs/imagenet100_vit_base_600ep.json` already sets `representation_data` to `val`.
+Use `--representation-samples` to change the sample size (default: 1024).
+For other configs, run:
 
 ```sh
 python scripts/train.py --config configs/imagenet100_vit_base.json \
   --representation-data data/imagenet100/val
 ```
 
-Скрипт выбирает одни и те же изображения из ImageFolder, применяет
-детерминированные resize и center crop,
+The run also saves `spectrum_N.pt` with singular values and metrics, and
+`settings.json` with the selected image paths. Covariance is computed but not
+stored. Resuming training does not duplicate completed epochs in the CSV.
+
+### Анализ сохранённых эпох
+
+После обучения можно сравнить представления из готовых `checkpoint_N.pt`:
+**target encoder** для EMA и обучаемого **encoder** для joint. Обучение и Comet
+для этого не нужны. Скрипт выбирает одни и те же
+изображения из ImageFolder, применяет детерминированные resize и center crop,
 усредняет patch tokens каждого изображения и считает ковариационную матрицу
 признаков. Энтропия вычисляется по нормированным сингулярным числам центрированной
 матрицы признаков; `effective_rank = exp(entropy)`. Низкие ранг и средняя дисперсия
 могут указывать на схлопывание представлений, но сами по себе не измеряют качество
 разделения классов.
 
-В папке запуска сохраняются `representation_analysis/representations.csv` для графиков,
-`representation_analysis/spectrum_N.pt` с сингулярными числами и метриками,
-`representation_analysis/settings.json` со списком выбранных изображений.
-Ковариационная матрица используется для расчёта, но не сохраняется.
-При продолжении обучения готовые эпохи не дублируются в CSV.
-
-### Анализ готовых чекпойнтов
-
-Если обучение уже прошло без онлайн-диагностики, те же показатели можно получить
-из `checkpoint_N.pt` без повторного обучения:
-
 ```sh
 python scripts/analyze_checkpoints.py \
-  --checkpoints runs/imagenet100-vit-base-600ep \
-  --data data/imagenet100/val \
-  --device cuda --bf16 --samples 1024
+  --checkpoints /home/container/shared/rejepa/runs/imagenet100-vit-base-600ep \
+  --data val \
+  --device cuda \
+  --bf16 \
+  --every 25
 ```
 
 Команду запускайте из корня репозитория на VM, заменив пути к папке с
