@@ -217,11 +217,13 @@ training, the first, every 25th, and final completed epochs are evaluated on the
 same images. EMA evaluates the target encoder; joint evaluates the shared encoder.
 Each evaluation appends a row to `representation_analysis/representations.csv`.
 `configs/imagenet100_vit_base_600ep.json` already sets `representation_data` to `val`.
-For the VM container config, run:
+The VM container config also sets `representation_data` to `val`. Run it from
+the directory containing `train/` and `val/`, since those paths are relative:
 
 ```sh
-python scripts/train.py --config configs/imagenet100_vit_base_600ep_sk_container.json \
-  --representation-data val
+cd /home/container/shared/rejepa
+python /home/container/rejepa/scripts/train.py \
+  --config /home/container/rejepa/configs/imagenet100_vit_base_600ep_sk_container.json
 ```
 
 Use `--representation-samples` to change the sample size (default: 1024).
