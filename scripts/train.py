@@ -194,10 +194,10 @@ def main():
     if args.representation_data is not None:
         image_size = model_options["image_size"]
         representation_transform = transforms.Compose([
-            transforms.Resize(int(image_size * 256 / 224), interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.Resize(int(image_size * 256 / 224), interpolation=crop_options["interpolation"]),
             transforms.CenterCrop(image_size),
             transforms.ToTensor(),
-            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+            transforms.Normalize(**normalize_options),
         ])
         representation_dataset = datasets.ImageFolder(args.representation_data, transform=representation_transform)
         if len(representation_dataset) < 2:
