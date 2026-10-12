@@ -74,6 +74,8 @@ def parse_args(argv=None):
     parser.add_argument("--mode", choices=("ema", "joint"), default="ema")
     parser.add_argument("--regularizer", choices=("none", "sigreg", "visreg"))
     parser.add_argument("--regularizer-weight", type=float, default=0.02)
+    parser.add_argument("--prediction-loss-type", choices=("smooth_l1", "mse"), default="smooth_l1")
+    parser.add_argument("--noise-std", type=float, default=0.0)
     args = parse_config_args(parser, argv)
     if args.regularizer is None:
         args.regularizer = "sigreg" if args.mode == "joint" else "none"
@@ -99,6 +101,8 @@ def parse_args(argv=None):
         parser.error("representation-samples must be at least 2")
     if not math.isfinite(args.regularizer_weight) or args.regularizer_weight < 0:
         parser.error("regularizer-weight must be finite and nonnegative")
+    if not math.isfinite(args.noise_std) or args.noise_std < 0:
+        parser.error("noise-std must be finite and nonnegative")
     if args.mode == "ema" and args.regularizer != "none":
         parser.error("regularization requires joint mode")
     if args.mode == "joint" and args.regularizer != "none" and args.batch_size < 2:
@@ -253,6 +257,11 @@ def main():
         versions=dict(python=sys.version.split()[0], torchvision=str(torchvision.__version__),
                       numpy=np.__version__, pillow=PIL.__version__),
     )
+    if args.prediction_loss_type == "mse":
+        config["objective"].update(loss="mse", beta=None)
+    if args.noise_std:
+        config["objective"].update(context_noise="independent Gaussian after context encoder",
+                                   context_noise_std=args.noise_std)
     if args.mode == "joint":
         config["objective"].update(
             regularizer=args.regularizer, regularizer_weight=args.regularizer_weight,
@@ -276,10 +285,12 @@ def main():
             "images", "selected_classes", "batch_size", "accumulation_steps", "epochs", "seed",
             "precision", "lr", "start_lr", "final_lr", "warmup_epochs", "weight_decay",
             "final_weight_decay", "ema_start", "ema_end", "mode", "regularizer",
-            "regularizer_weight", "total_steps", "representation_data", "representation_samples",
+            "regularizer_weight", "prediction_loss_type", "noise_std", "total_steps",
+            "representation_data", "representation_samples",
             "preprocessing", "optimizer", "objective", "schedules", "architecture", "smoke_data",
         )
         defaults = dict(mode="ema", regularizer="none", regularizer_weight=0.02,
+                        prediction_loss_type="smooth_l1", noise_std=0.0,
                         representation_data=None, representation_samples=1024)
         differences = [key for key in compatible
                        if checkpoint["config"].get(key, defaults.get(key)) != config.get(key)]
@@ -463,6 +474,7 @@ def main():
                         zero_grad=microstep == 0, update=microstep == group_size - 1,
                         mode=args.mode, regularizer=args.regularizer,
                         regularizer_weight=args.regularizer_weight,
+                        prediction_loss_type=args.prediction_loss_type, noise_std=args.noise_std,
                     )
                     loss_sum += metrics["loss"]
                     prediction_sum += metrics.get("prediction_loss", metrics["loss"])

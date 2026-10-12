@@ -6,6 +6,7 @@ import torch
 
 from src.models.encoder import VisionTransformer
 from src.models.predictor import VisionTransformerPredictor
+from src.losses import prediction_loss
 from src.optimizer import create_optimizer
 from src.train_step import train_step
 
@@ -24,12 +25,50 @@ class TestJointTraining(unittest.TestCase):
         self.context = torch.tensor([[0, 1], [1, 2]])
         self.targets = [torch.tensor([[2, 3], [0, 3]])]
 
-    def step(self, regularizer="none", weight=0.02):
+    def step(self, regularizer="none", weight=0.02, **options):
         return train_step(
             self.encoder, self.predictor, None, self.optimizer,
             self.images, self.context, self.targets, None,
             mode="joint", regularizer=regularizer, regularizer_weight=weight,
+            **options,
         )
+
+    def test_mse_averages_blocks_and_backpropagates(self):
+        predictions = [torch.tensor([[[1.0, 3.0]]]), torch.tensor([[[2.0, 4.0]]])]
+        targets = [torch.zeros_like(prediction) for prediction in predictions]
+        self.assertAlmostEqual(prediction_loss(predictions, targets, "mse").item(), 7.5)
+
+        metrics = self.step(weight=0, prediction_loss_type="mse")
+        self.assertGreater(metrics["grad_norm"], 0)
+        self.assertAlmostEqual(metrics["loss"], metrics["prediction_loss"])
+
+    def test_noise_changes_context_seen_by_predictor(self):
+        encoder_outputs = []
+        predictor_inputs = []
+        encoder_hook = self.encoder.register_forward_hook(
+            lambda _, __, output: encoder_outputs.append(output.detach().clone())
+        )
+        predictor_hook = self.predictor.predictor_embed.register_forward_pre_hook(
+            lambda _, inputs: predictor_inputs.append(inputs[0].detach().clone())
+        )
+        try:
+            metrics = self.step(weight=0, prediction_loss_type="mse", noise_std=0.5)
+        finally:
+            encoder_hook.remove()
+            predictor_hook.remove()
+
+        self.assertEqual(len(encoder_outputs), 2)
+        self.assertEqual(len(predictor_inputs), 1)
+        self.assertEqual(encoder_outputs[1].shape, predictor_inputs[0].shape)
+        self.assertGreater((predictor_inputs[0] - encoder_outputs[1]).abs().sum().item(), 0)
+        self.assertGreater(metrics["grad_norm"], 0)
+
+    def test_invalid_noise_and_loss_are_rejected(self):
+        for options in ({"noise_std": -0.1}, {"noise_std": float("nan")},
+                        {"prediction_loss_type": "unknown"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.step(**options)
+        self.assertEqual(len(self.optimizer.state), 0)
 
     def test_prediction_trains_both_calls_to_the_same_encoder(self):
         outputs = []
