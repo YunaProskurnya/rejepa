@@ -201,9 +201,11 @@ python scripts/train.py --config configs/imagenet100_vit_base.json \
 
 ```sh
 python scripts/analyze_checkpoints.py \
-  --checkpoints runs/imagenet100-vit-base-600ep \
-  --data data/imagenet100/val \
-  --device cuda --bf16 --samples 1024
+  --checkpoints /home/container/shared/rejepa/runs/imagenet100-vit-base-600ep \
+  --data val \
+  --device cuda \
+  --bf16 \
+  --every 25
 ```
 
 Команду запускайте из корня репозитория на VM, заменив пути к папке с
