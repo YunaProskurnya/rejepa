@@ -52,7 +52,8 @@ class TestJointTraining(unittest.TestCase):
             lambda _, inputs: predictor_inputs.append(inputs[0].detach().clone())
         )
         try:
-            metrics = self.step(weight=0, prediction_loss_type="mse", noise_std=0.5)
+            metrics = self.step(weight=0, prediction_loss_type="mse", noise_std=0.5,
+                                precision="bf16")
         finally:
             encoder_hook.remove()
             predictor_hook.remove()

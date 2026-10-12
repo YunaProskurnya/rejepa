@@ -46,9 +46,7 @@ def train_step(encoder, predictor, target_encoder, optimizer,
         )
         context = encoder(images, context_indices)
         if noise_std:
-            context = context + noise_std * torch.randn(
-                context.shape, device=context.device, dtype=torch.float32,
-            ).to(context.dtype)
+            context = context + noise_std * torch.randn_like(context)
         predictions = predictor(context, context_indices, target_indices)
         prediction = prediction_loss(predictions, targets, prediction_loss_type)
         regularization = apply_regularization(features, regularizer)
