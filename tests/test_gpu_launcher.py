@@ -157,6 +157,29 @@ class TestGPULauncher(unittest.TestCase):
             checkpoint = torch.load(output / "checkpoint.pt", weights_only=True)
             self.assertEqual(checkpoint["encoder"]["patch_embed.proj.weight"].dtype, torch.float32)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for fusion resume")
+    def test_cuda_resume_toggles_fusion_and_cudnn_benchmark(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            path = output / "checkpoint.pt"
+            for step, enabled in ((1, False), (2, True), (3, False)):
+                arguments = ["--smoke-test", "--device", "cuda", "--output", output,
+                             "--mode", "joint", "--regularizer", "sigreg", "--max-steps", step,
+                             "--fused-adamw" if enabled else "--no-fused-adamw",
+                             "--cudnn-benchmark" if enabled else "--no-cudnn-benchmark"]
+                if step > 1:
+                    arguments.extend(("--resume", path))
+                self.launch(*arguments)
+                checkpoint = torch.load(path, weights_only=True)
+                self.assertEqual(checkpoint["step"], step)
+                self.assertEqual(checkpoint["config"]["fused_adamw"], enabled)
+                self.assertEqual(checkpoint["config"]["cudnn_benchmark"], enabled)
+                for group in checkpoint["optimizer"]["param_groups"]:
+                    self.assertIs(group["fused"], True if enabled else None)
+                    self.assertIsNone(group["foreach"])
+                self.assertTrue(all(state["step"].item() == step
+                                    for state in checkpoint["optimizer"]["state"].values()))
+
 
 if __name__ == "__main__":
     unittest.main()

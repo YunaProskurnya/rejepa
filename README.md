@@ -148,6 +148,8 @@ python scripts/train.py --config configs/smoke.json --collator reference --outpu
 | `--device cpu / cuda` | По умолчанию CPU. |
 | `--batch-size`, `--accumulation-steps` | Эффективный batch size — их произведение; optimizer, EMA и расписания обновляются после накопления. |
 | `--precision fp32 / bf16` | По умолчанию FP32; BF16 уменьшает затраты памяти на поддерживаемом оборудовании. |
+| `--compile` | Компиляция encoder и predictor через `Module.compile(dynamic=True, mode="default")` после загрузки checkpoint. По умолчанию выключена. |
+| `--fused-adamw`, `--cudnn-benchmark` | Только CUDA; по умолчанию выключены. Fused AdamW сохраняет группы и гиперпараметры; CuDNN подбирает алгоритм свёртки patch embedding. |
 | `--epochs`, `--warmup-epochs` | По умолчанию 1 и 0; warmup должен быть короче обучения. |
 | `--lr`, `--weight-decay`, `--ema-start` | Пиковый LR, начальные weight decay и EMA; остальные параметры расписаний доступны в `--help`. |
 | `--num-workers`, `--seed` | Загрузка данных и воспроизводимость; по умолчанию 0 и 0. |
@@ -155,6 +157,38 @@ python scripts/train.py --config configs/smoke.json --collator reference --outpu
 При нехватке памяти уменьшайте batch size, при необходимости компенсируйте его
 накоплением градиентов. Маски согласуются внутри каждого микробатча, поэтому
 накопление не полностью эквивалентно одному большому батчу.
+
+В удалённых конфигурациях `imagenet100_vit_base_400ep_sk_container_sigreg.json`
+и `imagenet100_vit_base_400ep_sk_container_visreg.json` все три опции включены.
+Для включения через CLI добавьте `--compile --fused-adamw --cudnn-benchmark`:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base_400ep_sk_container_visreg.json \
+  --compile --fused-adamw --cudnn-benchmark
+```
+
+Отключение, в том числе при `--resume`:
+
+```sh
+python scripts/train.py --config configs/imagenet100_vit_base_400ep_sk_container_visreg.json \
+  --no-compile --no-fused-adamw --no-cudnn-benchmark
+```
+
+Это параметры исполнения: их можно менять при продолжении, сохраняя рецепт
+обучения. При загрузке состояния AdamW применяются запрошенные настройки
+`fused`/`foreach`; остальные проверки совместимости остаются строгими.
+Опции сохраняются в metadata запуска. BF16, batch size, маски, расписания,
+loss и цикл регуляризации по патчам сохраняются. Допустимы небольшие различия
+округления; CuDNN может выбирать разные алгоритмы между запусками.
+Компиляция добавляет время старта. Скорость на H200, работа CUDA-компилятора
+и downstream accuracy пока не проверены. API сверены с PyTorch 2.14;
+локальные проверки используют `menv` с PyTorch 2.4.1, окружения не меняются.
+В этом macOS-окружении default compiler выдаёт ошибку C++ типов
+`div_floor_integer` при dynamic shapes. Локальная численная проверка использует
+`aot_eager`; CUDA-проверки default compiler и fused AdamW пропускаются без GPU.
+Описание API: [Module.compile](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Module.html#torch.nn.Module.compile),
+[AdamW](https://docs.pytorch.org/docs/2.14/generated/torch.optim.AdamW.html),
+[CuDNN benchmark](https://docs.pytorch.org/docs/2.14/notes/randomness.html#cuda-convolution-benchmarking).
 
 ## Результаты и продолжение
 

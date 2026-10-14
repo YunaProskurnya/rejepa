@@ -44,6 +44,8 @@ class TestDatasetTraining(unittest.TestCase):
             output = Path(temporary) / "run"
             with patch.dict(os.environ, {"COMET_API_KEY": "test-key"}), patch.dict(
                 sys.modules, {"comet_ml": comet, "comet_ml.integration.pytorch": pytorch},
+            ), patch.object(train, "start", comet.start), patch.object(
+                train, "log_model", pytorch.log_model,
             ), patch.object(sys, "argv", ["train.py", "--smoke-test", "--max-steps", "1",
                                           "--output", str(output)]):
                 train.main()

@@ -39,6 +39,15 @@ def seed_worker(worker_id):
     np.random.seed(seed)
 
 
+def resume_config(config):
+    optimizer = config.get("optimizer")
+    if optimizer is None:
+        return config
+    defaults = {key: value for key, value in optimizer["defaults"].items()
+                if key not in ("fused", "foreach")}
+    return {**config, "optimizer": {**optimizer, "defaults": defaults}}
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Single-device I-JEPA training")
     parser.add_argument("--config", type=Path, help="JSON experiment settings; CLI options take precedence")
@@ -54,6 +63,9 @@ def parse_args(argv=None):
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--fused-adamw", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--accumulation-steps", type=int, default=1)
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--resume", type=Path)
@@ -75,6 +87,8 @@ def parse_args(argv=None):
     parser.add_argument("--regularizer", choices=("none", "sigreg", "visreg"))
     parser.add_argument("--regularizer-weight", type=float, default=0.02)
     args = parse_config_args(parser, argv)
+    if (args.fused_adamw or args.cudnn_benchmark) and torch.device(args.device).type != "cuda":
+        parser.error("fused-adamw and cudnn-benchmark require a CUDA device")
     if args.regularizer is None:
         args.regularizer = "sigreg" if args.mode == "joint" else "none"
     if (args.data is not None) == args.smoke_test:
@@ -127,6 +141,7 @@ def main():
         if device.index is None:
             device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = args.cudnn_benchmark
         if args.precision == "bf16" and not torch.cuda.is_bf16_supported():
             parser.error("this CUDA device does not support bfloat16")
     if device.type == "cpu":
@@ -195,7 +210,8 @@ def main():
                              depth=predictor_depth, num_heads=num_heads, **transformer_options)
     predictor = VisionTransformerPredictor(**predictor_options).to(device)
     target_encoder = create_target_encoder(encoder) if args.mode == "ema" else None
-    optimizer = create_optimizer(encoder, predictor, lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = create_optimizer(encoder, predictor, lr=args.lr, weight_decay=args.weight_decay,
+                                 fused=True if args.fused_adamw else None)
     encoder.train()
     predictor.train()
     if target_encoder is not None:
@@ -281,8 +297,10 @@ def main():
         )
         defaults = dict(mode="ema", regularizer="none", regularizer_weight=0.02,
                         representation_data=None, representation_samples=1024)
+        saved_config = resume_config(checkpoint["config"])
+        requested_config = resume_config(config)
         differences = [key for key in compatible
-                       if checkpoint["config"].get(key, defaults.get(key)) != config.get(key)]
+                       if saved_config.get(key, defaults.get(key)) != requested_config.get(key)]
         if differences:
             parser.error("resume configuration differs: " + ", ".join(differences))
         if "next_batch" not in checkpoint:
@@ -291,6 +309,8 @@ def main():
         predictor.load_state_dict(checkpoint["predictor"])
         if target_encoder is not None:
             target_encoder.load_state_dict(checkpoint["target_encoder"])
+        for group in checkpoint["optimizer"]["param_groups"]:
+            group.update(fused=optimizer.defaults["fused"], foreach=optimizer.defaults["foreach"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         step = checkpoint["step"]
         next_epoch = checkpoint["next_epoch"]
@@ -311,9 +331,12 @@ def main():
     if args.output.exists() and not args.resume:
         parser.error("output already exists; choose a new directory or pass --resume")
     if args.output.exists() and args.resume and (args.output / "config.json").exists():
-        previous_config = json.loads((args.output / "config.json").read_text(encoding="utf-8"))
-        if any(previous_config.get(key, defaults.get(key)) != config.get(key) for key in compatible):
+        previous_config = resume_config(json.loads((args.output / "config.json").read_text(encoding="utf-8")))
+        if any(previous_config.get(key, defaults.get(key)) != requested_config.get(key) for key in compatible):
             parser.error("existing output directory belongs to an incompatible run")
+    if args.compile:
+        encoder.compile(dynamic=True, mode="default")
+        predictor.compile(dynamic=True, mode="default")
     representation_every = 25
     representation_output = args.output / "representation_analysis"
     if representation_loader is not None:

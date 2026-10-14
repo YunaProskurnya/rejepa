@@ -1,3 +1,4 @@
+from copy import deepcopy
 import unittest
 
 import torch
@@ -74,6 +75,35 @@ class TestOptimizer(unittest.TestCase):
             self.assertEqual(self.optimizer.param_groups[0]["weight_decay"], value)
             self.assertEqual(self.optimizer.param_groups[1]["weight_decay"], 0.0)
         self.assertAlmostEqual(value, 0.4)
+
+    def test_fusion_preserves_groups_and_hyperparameters(self):
+        fused = create_optimizer(self.encoder, self.predictor, lr=0.1, weight_decay=0.2, fused=True)
+        self.assertTrue(fused.defaults["fused"])
+        self.assertIsNone(self.optimizer.defaults["fused"])
+        for eager, accelerated in zip(self.optimizer.param_groups, fused.param_groups):
+            self.assertEqual([id(parameter) for parameter in eager["params"]],
+                             [id(parameter) for parameter in accelerated["params"]])
+            self.assertEqual({key: value for key, value in eager.items() if key not in ("params", "fused")},
+                             {key: value for key, value in accelerated.items() if key not in ("params", "fused")})
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for fused AdamW parity")
+    def test_cuda_fused_updates_match_unfused(self):
+        encoder = self.encoder.cuda()
+        predictor = self.predictor.cuda()
+        fused_encoder, fused_predictor = deepcopy(encoder), deepcopy(predictor)
+        eager = create_optimizer(encoder, predictor, lr=0.001, weight_decay=0.2, fused=False)
+        fused = create_optimizer(fused_encoder, fused_predictor, lr=0.001, weight_decay=0.2, fused=True)
+        for step in range(3):
+            for eager_module, fused_module in ((encoder, fused_encoder), (predictor, fused_predictor)):
+                for parameter, counterpart in zip(eager_module.parameters(), fused_module.parameters()):
+                    if parameter.requires_grad:
+                        parameter.grad = torch.full_like(parameter, 0.25 + step)
+                        counterpart.grad = parameter.grad.clone()
+            eager.step()
+            fused.step()
+            for eager_module, fused_module in ((encoder, fused_encoder), (predictor, fused_predictor)):
+                for parameter, counterpart in zip(eager_module.parameters(), fused_module.parameters()):
+                    torch.testing.assert_close(parameter, counterpart, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":

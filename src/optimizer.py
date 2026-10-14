@@ -1,7 +1,7 @@
 import torch
 
 
-def create_optimizer(encoder, predictor, lr, weight_decay):
+def create_optimizer(encoder, predictor, lr, weight_decay, *, fused=None):
     decay_params = []
     no_decay_params = []
 
@@ -20,4 +20,4 @@ def create_optimizer(encoder, predictor, lr, weight_decay):
         {"params": no_decay_params, "weight_decay": 0.0, "WD_exclude": True},
     ]
 
-    return torch.optim.AdamW(parameter_groups, lr=lr)
+    return torch.optim.AdamW(parameter_groups, lr=lr, fused=fused)
