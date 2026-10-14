@@ -107,6 +107,8 @@ python scripts/train.py --config configs/imagenet100_vit_base.json --batch-size 
 Все изображения проходят random resized crop до 224×224 и нормализацию ImageNet.
 Маски генерируются заново для каждого батча.
 
+CUDA-лаунчер отключает только cuDNN-бэкенд SDPA: на H200 с PyTorch 2.14.1 / cuDNN 9.24 воспроизведены NaN-градиенты attention при конечных входах и длине контекста 64. FlashAttention, memory-efficient и math SDPA остаются доступны. Это не отключает cuDNN для свёрток и не меняет `--cudnn-benchmark`.
+
 ## Режимы обучения и регуляризация
 
 `--mode ema` обучает encoder с замороженным target encoder, обновляемым через EMA.

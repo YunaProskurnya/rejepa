@@ -16,6 +16,38 @@ LAUNCHER = ROOT / "tests/run_training.py"
 
 
 class TestGPULauncher(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available() and hasattr(torch.backends.cuda, "enable_cudnn_sdp"),
+                         "CUDA with cuDNN SDPA required")
+    def test_cuda_launcher_avoids_nonfinite_cudnn_attention_gradients(self):
+        program = """
+import runpy
+import sys
+import torch
+
+torch.backends.cuda.enable_cudnn_sdp(True)
+runpy.run_path(sys.argv.pop(1), run_name="__main__")
+assert not torch.backends.cuda.cudnn_sdp_enabled()
+torch.manual_seed(1)
+q = torch.randn(1, 12, 64, 64, device="cuda", dtype=torch.bfloat16) * 0.1
+k = torch.randn_like(q) * 0.1
+v = torch.randn_like(q)
+q[..., 0] = 1
+k[..., 0] = -960
+for tensor in (q, k, v):
+    tensor.requires_grad_()
+out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+out.backward(torch.randn_like(out))
+assert torch.isfinite(out).all()
+assert all(torch.isfinite(tensor.grad).all() for tensor in (q, k, v))
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [sys.executable, "-c", program, str(LAUNCHER), "--smoke-test", "--device", "cuda",
+                 "--precision", "bf16", "--max-steps", "1", "--output", str(Path(temporary) / "run")],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def launch(self, *arguments, success=True):
         result = subprocess.run(
             [sys.executable, str(LAUNCHER), *map(str, arguments)],

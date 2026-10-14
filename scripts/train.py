@@ -142,6 +142,8 @@ def main():
             device = torch.device("cuda", torch.cuda.current_device())
         torch.cuda.set_device(device)
         torch.backends.cudnn.benchmark = args.cudnn_benchmark
+        if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+            torch.backends.cuda.enable_cudnn_sdp(False)
         if args.precision == "bf16" and not torch.cuda.is_bf16_supported():
             parser.error("this CUDA device does not support bfloat16")
     if device.type == "cpu":
