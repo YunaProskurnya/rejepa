@@ -10,15 +10,15 @@ class SIGReg(nn.Module):
             raise ValueError("num_slices must be positive, num_knots at least 2, and t_max positive")
 
         self.num_slices = num_slices
-        t = torch.linspace(0, t_max, num_knots)
-        weights = torch.full((num_knots,), 2 * t_max / (num_knots - 1))
+        t = torch.linspace(0, t_max, num_knots, dtype=torch.float32)
+        weights = torch.full((num_knots,), 2 * t_max / (num_knots - 1), dtype=torch.float32)
         weights[0] /= 2
         weights[-1] /= 2
         phi = torch.exp(-t.square() / 2)
 
-        self.t = t
-        self.phi = phi
-        self.weights = weights * phi
+        self.register_buffer("t", t)
+        self.register_buffer("phi", phi)
+        self.register_buffer("weights", weights * phi)
 
     def forward(self, z):
         if z.ndim != 2 or z.shape[0] < 2 or z.shape[1] < 1:
@@ -26,16 +26,17 @@ class SIGReg(nn.Module):
         if not torch.is_floating_point(z):
             raise TypeError("z must be a floating-point tensor")
 
-        x = z.float() if z.dtype in (torch.float16, torch.bfloat16) else z
-        directions = torch.randn(x.shape[1], self.num_slices, device=x.device, dtype=x.dtype)
-        directions = F.normalize(directions, dim=0)
+        with torch.autocast(z.device.type, enabled=False):
+            x = z.float() if z.dtype in (torch.float16, torch.bfloat16) else z
+            directions = torch.randn(x.shape[1], self.num_slices, device=x.device, dtype=x.dtype)
+            directions = F.normalize(directions, dim=0)
 
-        t = self.t.to(x)
-        phi = self.phi.to(x)
-        weights = self.weights.to(x)
-        angles = (x @ directions).unsqueeze(-1) * t
-        real = angles.cos().mean(dim=0)
-        imag = angles.sin().mean(dim=0)
-        error = (real - phi).square() + imag.square()
+            t = self.t.to(x)
+            phi = self.phi.to(x)
+            weights = self.weights.to(x)
+            angles = (x @ directions).unsqueeze(-1) * t
+            real = angles.cos().mean(dim=0)
+            imag = angles.sin().mean(dim=0)
+            error = (real - phi).square() + imag.square()
 
-        return x.shape[0] * (error * weights).sum(dim=-1).mean()
+            return ((error @ weights) * x.shape[0]).mean()
