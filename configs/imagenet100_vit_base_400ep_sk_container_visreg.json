@@ -3,6 +3,7 @@
   "representation_data": "val",
   "dataset": "imagefolder",
   "output": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg",
+  "resume": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/checkpoint_288.pt",
   "collator": "custom",
   "model": "vit_base",
   "mode": "joint",
@@ -19,7 +20,7 @@
   "final_lr": 0.0000000625,
   "weight_decay": 0.04,
   "final_weight_decay": 0.4,
-  "num_workers": 4,
+  "num_workers": 6,
   "seed": 0,
   "checkpoint_every": 100
 }
