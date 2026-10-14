@@ -55,14 +55,28 @@ def spectrum_statistics(features):
     }
 
 
+def patchwise_spectrum_statistics(features):
+    if features.ndim != 3 or features.shape[1] < 1:
+        raise ValueError("features must have shape [N, P, D] with P >= 1")
+
+    statistics = spectrum_statistics(features.mean(dim=1))
+    statistics["patch_effective_ranks"] = torch.tensor([
+        spectrum_statistics(features[:, position, :])["effective_rank"]
+        for position in range(features.shape[1])
+    ])
+    return statistics
+
+
 @torch.inference_mode()
-def evaluate_representation(encoder, loader, device, bf16):
+def evaluate_representation(encoder, loader, device, bf16, *, patchwise=False):
     features = []
     for images, _ in loader:
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
-            features.append(encoder(images.to(device, non_blocking=True)).float().mean(dim=1).cpu())
+            encoded = encoder(images.to(device, non_blocking=True)).float()
+            features.append((encoded if patchwise else encoded.mean(dim=1)).cpu())
 
-    return spectrum_statistics(torch.cat(features))
+    values = torch.cat(features)
+    return patchwise_spectrum_statistics(values) if patchwise else spectrum_statistics(values)
 
 
 def save_representation(output, epoch, step, statistics):
@@ -75,3 +89,12 @@ def save_representation(output, epoch, step, statistics):
         if stream.tell() == 0:
             writer.writeheader()
         writer.writerow(row)
+    if "patch_effective_ranks" in statistics:
+        with (output / "patch_ranks.csv").open("a", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            if stream.tell() == 0:
+                writer.writerow(("epoch", "step", "patch_index", "effective_rank"))
+            writer.writerows(
+                (epoch, step, position, rank.item())
+                for position, rank in enumerate(statistics["patch_effective_ranks"])
+            )
