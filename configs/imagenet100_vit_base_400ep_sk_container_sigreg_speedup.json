@@ -5,7 +5,7 @@
   "output": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg",
   "collator": "custom",
   "model": "vit_base",
-  "resume": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg/checkpoint_4.pt",
+  "resume": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg/checkpoint_9.pt",
   "mode": "joint",
   "regularizer": "sigreg",
   "regularizer_weight": 0.02,
