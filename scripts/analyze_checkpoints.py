@@ -64,6 +64,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     (output / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
     (output / "representations.csv").write_text("", encoding="utf-8")
+    (output / "patch_ranks.csv").write_text("", encoding="utf-8")
 
     encoder = VisionTransformer(**model_options).to(device).eval()
     for epoch, path in checkpoints:
@@ -74,9 +75,10 @@ def main():
                                      config.get("regularizer_weight") != first_config.get("regularizer_weight"))):
             raise ValueError(f"training configuration differs in {path}")
         encoder.load_state_dict(checkpoint[source])
-        statistics = evaluate_representation(encoder, loader, device, args.bf16)
+        statistics = evaluate_representation(encoder, loader, device, args.bf16, patchwise=True)
         save_representation(output, epoch, checkpoint.get("step"), statistics)
         print(f"epoch {epoch + 1}: rank={statistics['effective_rank']:.2f} "
+              f"mean_patch_rank={statistics['patch_effective_ranks'].mean().item():.2f} "
               f"entropy={statistics['singular_entropy']:.3f} "
               f"variance={statistics['mean_variance']:.6f}", flush=True)
     print(f"Saved analysis to {output.resolve()}", flush=True)

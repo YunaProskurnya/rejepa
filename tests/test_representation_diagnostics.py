@@ -11,7 +11,7 @@ from PIL import Image
 import torch
 
 from src.models.encoder import VisionTransformer
-from src.representation_diagnostics import spectrum_statistics
+from src.representation_diagnostics import patchwise_spectrum_statistics, spectrum_statistics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,13 @@ class TestRepresentationDiagnostics(unittest.TestCase):
         collapsed = spectrum_statistics(torch.ones(4, 2))
         self.assertEqual(collapsed["singular_entropy"], 0)
         self.assertEqual(collapsed["effective_rank"], 0)
+
+    def test_patch_ranks_can_exceed_pooled_rank(self):
+        patch = torch.tensor([[1., 0.], [-1., 0.], [0., 1.], [0., -1.]])
+        statistics = patchwise_spectrum_statistics(torch.stack((patch, -patch), dim=1))
+
+        self.assertEqual(statistics["effective_rank"], 0)
+        torch.testing.assert_close(statistics["patch_effective_ranks"], torch.tensor([2., 2.]))
 
     def test_training_records_selected_epochs_and_resumes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -121,14 +128,21 @@ class TestRepresentationDiagnostics(unittest.TestCase):
             output = run / "checkpoint_analysis"
             with (output / "representations.csv").open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream))
+            with (output / "patch_ranks.csv").open(newline="", encoding="utf-8") as stream:
+                patch_rows = list(csv.DictReader(stream))
             self.assertEqual([int(row["epoch"]) for row in rows], [0, 1, 3])
             self.assertEqual([int(row["step"]) for row in rows], [10, 20, 40])
+            self.assertEqual(len(patch_rows), 3 * 16)
+            self.assertEqual([int(row["patch_index"]) for row in patch_rows[:16]], list(range(16)))
+            self.assertTrue(all(float(row["effective_rank"]) == 0 for row in patch_rows[:16]))
+            self.assertTrue(any(float(row["effective_rank"]) > 0 for row in patch_rows[16:32]))
             self.assertEqual(float(rows[0]["effective_rank"]), 0)
             self.assertGreater(float(rows[1]["effective_rank"]), 0)
             for row in rows:
                 statistics = torch.load(output / row["artifact"], weights_only=True)
                 self.assertEqual(statistics["images"], 3)
                 self.assertEqual(len(statistics["singular_values"]), 2)
+                self.assertEqual(len(statistics["patch_effective_ranks"]), 16)
                 self.assertTrue(torch.isfinite(statistics["singular_values"]).all())
 
             joint = root / "joint"
