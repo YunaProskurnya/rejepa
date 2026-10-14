@@ -2,10 +2,9 @@
   "data": "train",
   "representation_data": "val",
   "dataset": "imagefolder",
-  "output": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg",
+  "output": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg-v2",
   "collator": "custom",
   "model": "vit_base",
-  "resume": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-sigreg/checkpoint_4.pt",
   "mode": "joint",
   "regularizer": "sigreg",
   "regularizer_weight": 0.02,
@@ -20,7 +19,7 @@
   "final_lr": 0.0000000625,
   "weight_decay": 0.04,
   "final_weight_decay": 0.4,
-  "num_workers": 4,
+  "num_workers": 32,
   "seed": 0,
   "checkpoint_every": 100
 }
