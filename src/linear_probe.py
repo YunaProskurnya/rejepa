@@ -1,7 +1,7 @@
 """Lightweight linear-probe monitoring, shared by training and checkpoint evaluation.
 
-Do not run this module as a script. Use scripts/train.py for scheduled evaluation
-or scripts/evaluate_linear.py --mode monitor for an already saved checkpoint.
+Do not run this module as a script. Use scripts/evaluate_linear_curve.py for saved
+epoch checkpoints or scripts/evaluate_linear.py --mode monitor for one checkpoint.
 The slower final evaluation lives in src/linear_probe_final.py.
 """
 

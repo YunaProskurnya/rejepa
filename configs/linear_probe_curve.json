@@ -1,0 +1,17 @@
+{
+  "checkpoints": "runs/imagenet100-vit-base-400ep-sigreg-v2",
+  "train": "data/imagenet100/train",
+  "val": "data/imagenet100/val",
+  "output": "runs/imagenet100-vit-base-400ep-sigreg-v2/linear_curve",
+  "every": 1,
+  "train_per_class": 100,
+  "val_per_class": 0,
+  "probe_epochs": 30,
+  "probe_batch_size": 256,
+  "probe_lr": 0.001,
+  "batch_size": 128,
+  "num_workers": 4,
+  "device": "cuda",
+  "precision": "bf16",
+  "seed": 0
+}

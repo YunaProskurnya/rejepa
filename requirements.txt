@@ -3,6 +3,7 @@ torch>=2.0
 torchvision>=0.15
 numpy
 Pillow
+matplotlib>=3.7
 comet_ml>=3.49
 
 kaggle
