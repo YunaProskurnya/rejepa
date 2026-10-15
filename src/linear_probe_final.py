@@ -166,7 +166,7 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                                 seed=0, precision='fp32', learning_rates=(0.01, 0.05, 0.001),
                                 weight_decays=(0.0005, 0.0), progress=None,
                                 representations=None, heads=('linear', 'batchnorm_linear'),
-                                feature_cache=None):
+                                feature_cache=None, reuse_cached_features=False):
     """Fit fresh independent probes with shared encoder passes and report final scores.
 
     The training loader must draw fresh random crops. The two scoring loaders must
@@ -186,6 +186,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         raise ValueError('weight_decays must contain nonnegative finite values')
     if precision not in ('fp32', 'bf16'):
         raise ValueError('precision must be fp32 or bf16')
+    if reuse_cached_features and feature_cache is None:
+        raise ValueError('reuse_cached_features requires a feature cache')
     train_images = (feature_cache.metadata['train_images'] if feature_cache is not None
                     else len(train_loader.dataset))
     if train_images < batch_size:
@@ -207,7 +209,7 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
         raise ValueError('last4 requires an encoder with at least four blocks')
     use_last4 = 'last4' in representations
     if feature_cache is not None:
-        if epochs > feature_cache.metadata['epochs']:
+        if not reuse_cached_features and epochs > feature_cache.metadata['epochs']:
             raise ValueError('requested epochs exceed the prepared feature cache')
         if num_classes != feature_cache.metadata['num_classes']:
             raise ValueError('num_classes does not match feature cache')
@@ -217,6 +219,7 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
     generators = _loader_generators((train_loader, train_eval_loader, val_loader))
     generator_states = [(generator, generator.get_state()) for generator in generators]
     trials, epoch_batches, dropped_images = [], [], []
+    history = []
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     started = time.perf_counter()
@@ -232,6 +235,7 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
             for epoch in range(epochs):
                 epoch_started = time.perf_counter()
                 for trial in trials:
+                    trial['_head'].train()
                     for group in trial['_optimizer'].param_groups:
                         group['lr'] = trial['lr'] * 0.1 ** (epoch // 15)
                 batches = 0
@@ -242,7 +246,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                         num_classes, stats)
                 else:
                     stats['images'] = train_images
-                    batches_source = feature_cache.batches(f'train_{epoch + 1:04d}', batch_size,
+                    cache_epoch = 1 if reuse_cached_features else epoch + 1
+                    batches_source = feature_cache.batches(f'train_{cache_epoch:04d}', batch_size,
                                                            drop_last=True)
                 for features, targets in batches_source:
                     if not trials:
@@ -267,9 +272,15 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                     raise ValueError('final probe loader did not produce one full effective head batch')
                 epoch_batches.append(batches)
                 dropped_images.append(stats['images'] - batches * batch_size)
+                row = dict(epoch=epoch + 1, epochs=epochs, steps=batches)
+                if reuse_cached_features:
+                    scores = _score_feature_trials(
+                        trials, feature_cache.batches('val', batch_size), num_classes, device)
+                    row.update(val_loss=scores[0]['loss'], val_top1=scores[0]['top1'])
+                    history.append(dict(row))
+                row['seconds'] = time.perf_counter() - epoch_started
                 if progress is not None:
-                    progress(dict(epoch=epoch + 1, epochs=epochs, steps=batches,
-                                  seconds=time.perf_counter() - epoch_started))
+                    progress(row)
             if feature_cache is None:
                 train_scores = _score_trials(encoder, trials, train_eval_loader, num_classes,
                                              device, precision, use_last4)
@@ -347,6 +358,8 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                'this implementation uses MAE LARS exclusions for all parameters with ndim <= 1. '
                'The paper grid takes precedence over the different grid in the public VISSL preset.',
     )
+    if reuse_cached_features:
+        protocol['name'] = 'linear_lite_cached'
     if feature_cache is not None:
         protocol.update(feature_cache=str(feature_cache.path.resolve()),
                         feature_cache_metadata=feature_cache.metadata,
@@ -355,6 +368,9 @@ def evaluate_final_linear_probe(encoder, train_loader, train_eval_loader, val_lo
                         encoder_norm_eps=feature_cache.metadata['encoder_norm_eps'],
                         encoder_passes_during_evaluation=0,
                         fresh_training_augmentations=False,
-                        training_augmentations='distinct precomputed random crop/flip per image per epoch')
+                        training_augmentations=('one precomputed random crop/flip per image reused each epoch'
+                                                if reuse_cached_features else
+                                                'distinct precomputed random crop/flip per image per epoch'))
     return dict(best=dict(best), trials=results, protocol=protocol,
+                **({'history': history} if reuse_cached_features else {}),
                 probe_seconds=time.perf_counter() - started)

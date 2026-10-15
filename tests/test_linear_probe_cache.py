@@ -68,6 +68,26 @@ class TestFeatureCache(unittest.TestCase):
                 self.assertEqual(cached['protocol']['encoder_passes_during_evaluation'], 0)
                 self.assertEqual(sum(len(y) for _, y in cache.batches('val', 4)), 9)
 
+    def test_lite_reuses_one_crop_and_reports_weighted_validation_loss(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'cache'
+            prepare_feature_cache(ToyEncoder(depth=4), *loaders(), 2, 'cpu', path,
+                                  epochs=1, last4=False)
+            cache = FeatureCache(path)
+            self.assertEqual(cache.metadata['representations'], ['last'])
+            progress = []
+            result = evaluate_final_linear_probe(
+                None, None, None, None, 2, 'cpu', epochs=3, batch_size=4,
+                feature_cache=cache, reuse_cached_features=True,
+                representations=('last',), heads=('linear',), learning_rates=(0.01,),
+                weight_decays=(0.0,), progress=progress.append)
+            self.assertEqual(len(result['trials']), 1)
+            self.assertEqual(len(result['history']), 3)
+            self.assertEqual(len(progress), 3)
+            self.assertAlmostEqual(result['history'][-1]['val_loss'], result['best']['val_loss'], places=6)
+            self.assertEqual(result['best']['val_images'], 9)
+            self.assertEqual(result['protocol']['name'], 'linear_lite_cached')
+
     def test_rejects_incomplete_truncated_and_insufficient_epoch_caches(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -120,6 +140,14 @@ class TestFeatureCache(unittest.TestCase):
                 return result
 
             run('prepare_linear_cache.py')
+            full_config = dict(config)
+            config.update(lite=True, cache=str(root / 'lite_features'), output=str(root / 'lite.json'))
+            config_file.write_text(json.dumps(config))
+            run('prepare_linear_cache.py')
+            lite_manifest = json.loads((root / 'lite_features' / 'manifest.json').read_text())
+            self.assertEqual(lite_manifest['epochs'], 1)
+            self.assertEqual(lite_manifest['representations'], ['last'])
+            config_file.write_text(json.dumps(full_config))
             online_output = root / 'online.json'
             online = subprocess.run([
                 sys.executable, str(ROOT / 'scripts' / 'evaluate_linear.py'),
@@ -146,6 +174,13 @@ class TestFeatureCache(unittest.TestCase):
             self.assertEqual(len(manifest['provenance']['checkpoint_sha256']), 64)
             self.assertEqual(manifest['provenance']['class_to_idx'], {'a': 0, 'b': 1})
             self.assertFalse((root / 'comet.json').exists())
+            config_file.write_text(json.dumps(config))
+            lite_result = run('evaluate_linear_cached.py')
+            lite = json.loads((root / 'lite.json').read_text())['metrics']
+            self.assertEqual(len(lite['trials']), 1)
+            self.assertEqual(len(lite['history']), 2)
+            self.assertIn('val_loss=', lite_result.stdout)
+            self.assertAlmostEqual(lite['history'][-1]['val_loss'], lite['best']['val_loss'], places=6)
 
 
 if __name__ == '__main__':

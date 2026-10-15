@@ -17,7 +17,7 @@ from .linear_probe_final import _labels, _loader_generators, _pooled_features
 
 def prepare_feature_cache(encoder, train_loader, train_eval_loader, val_loader,
                           num_classes, device, path, *, epochs=50, seed=0,
-                          precision='fp32', provenance=None, progress=None):
+                          precision='fp32', provenance=None, progress=None, last4=True):
     """Extract all images, including optimizer-batch tails, without fitting heads.
 
     Output must not exist. An interrupted cache is deliberately not usable; use a
@@ -29,7 +29,7 @@ def prepare_feature_cache(encoder, train_loader, train_eval_loader, val_loader,
     if any(len(loader.dataset) == 0 for loader in (train_loader, train_eval_loader, val_loader)):
         raise ValueError('cache requires nonempty train and validation datasets')
     path.mkdir(parents=True, exist_ok=False)
-    use_last4 = (hasattr(encoder, 'get_intermediate_layers') and
+    use_last4 = (last4 and hasattr(encoder, 'get_intermediate_layers') and
                  len(getattr(encoder, 'blocks', ())) >= 4)
     stored = 'last4' if use_last4 else 'last'
     norm = getattr(encoder, 'norm', None)

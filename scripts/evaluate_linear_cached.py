@@ -28,6 +28,7 @@ def parse_args(argv=None, *, prepare=False):
     parser.add_argument('--train', type=Path)
     parser.add_argument('--val', type=Path)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--lite', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=128, help='encoder extraction batch (prepare only)')
     parser.add_argument('--probe-batch-size', type=int, default=16384)
@@ -99,12 +100,14 @@ def main(argv=None, *, prepare=False):
         provenance['dataset_samples'] = {
             split: [(str(Path(path).resolve()), int(label)) for path, label in loader.dataset.samples]
             for split, loader in (('train', loaders[0]), ('val', loaders[2]))}
-        dimension = options['embed_dim'] * (4 if options['depth'] >= 4 else 1)
-        estimate = (len(loaders[0].dataset) * (args.epochs + 1) + len(loaders[2].dataset)) * (4 * dimension + 8)
-        print(f'Preparing {args.epochs} crop epochs plus train/val scoring; estimated {estimate / 1e9:.2f} GB.', flush=True)
+        cache_epochs = 1 if args.lite else args.epochs
+        dimension = options['embed_dim'] * (4 if options['depth'] >= 4 and not args.lite else 1)
+        estimate = (len(loaders[0].dataset) * (cache_epochs + 1) + len(loaders[2].dataset)) * (4 * dimension + 8)
+        print(f'Preparing {cache_epochs} crop epochs plus train/val scoring; estimated {estimate / 1e9:.2f} GB.', flush=True)
         metadata = prepare_feature_cache(
             encoder, *loaders, len(loaders[0].dataset.classes), device, args.cache,
-            epochs=args.epochs, seed=args.seed, precision=args.precision, provenance=provenance,
+            epochs=cache_epochs, seed=args.seed, precision=args.precision, provenance=provenance,
+            last4=not args.lite,
             progress=lambda row: print(f"Cached {row['split']}: {row['images']} images, {row['seconds']:.1f}s", flush=True))
         print(f"Cache ready: {args.cache.resolve()} ({metadata['preparation_seconds']:.1f}s)", flush=True)
         return
@@ -116,7 +119,7 @@ def main(argv=None, *, prepare=False):
     metadata['provenance'] = {key: value for key, value in metadata['provenance'].items()
                               if key != 'dataset_samples'}
     cache.metadata = metadata
-    if args.epochs > metadata['epochs']:
+    if not args.lite and args.epochs > metadata['epochs']:
         parser.error('epochs exceeds available cached crop epochs')
     config = {key: value for key, value in config.items()
               if key not in ('checkpoint', 'train', 'val', 'precision', 'batch_size', 'num_workers')}
@@ -130,14 +133,20 @@ def main(argv=None, *, prepare=False):
 
         def progress(row):
             print(f"Cached linear probe: epoch={row['epoch']}/{row['epochs']} "
-                  f"head_steps={row['steps']} seconds={row['seconds']:.1f}", flush=True)
-            tracker.log_metrics(dict(head_steps=row['steps'], seconds=row['seconds']),
+                  f"head_steps={row['steps']} seconds={row['seconds']:.1f}"
+                  + (f" val_loss={row['val_loss']:.6f} val_top1={row['val_top1']:.4f}"
+                     if 'val_loss' in row else ''), flush=True)
+            tracker.log_metrics(dict(head_steps=row['steps'], seconds=row['seconds'],
+                                     **{key: row[key] for key in ('val_loss', 'val_top1') if key in row}),
                                 prefix='linear_final_progress/', step=row['epoch'], epoch=row['epoch'])
 
+        options = dict(representations=('last',), heads=('linear',),
+                       learning_rates=(0.01,), weight_decays=(0.0,),
+                       reuse_cached_features=True) if args.lite else {}
         metrics = evaluate_final_linear_probe(
             None, None, None, None, metadata['num_classes'], device,
             epochs=args.epochs, batch_size=args.probe_batch_size, seed=args.seed,
-            feature_cache=cache, progress=progress)
+            feature_cache=cache, progress=progress, **options)
         config['protocol'] = metrics.pop('protocol')
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(dict(config=config, metrics=metrics), indent=2), encoding='utf-8')

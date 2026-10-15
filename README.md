@@ -374,3 +374,20 @@ python scripts/train.py --help
 python scripts/evaluate_knn.py --help
 python -m unittest discover -s tests
 ```
+
+### Lite cached linear probe
+
+Use `"lite": true` to cache one random crop/flip per training image and only the
+last-layer pooled features. Evaluation reuses that crop each epoch and fits one
+linear head (LARS, reference LR 0.01, weight decay 0). Validation cross-entropy and
+top-1 are printed each epoch and saved in `metrics.history`; final train/val
+metrics and summary files use the existing format. This is a cheaper diagnostic
+with a different recipe from the full probe grid.
+
+```sh
+python scripts/prepare_linear_cache.py --config configs/linear_probe_cached_399.json
+python scripts/evaluate_linear_cached.py --config configs/linear_probe_cached_399.json
+```
+
+Run these from the repository root, inside tmux with logs on the GPU server.
+Use a new cache and output path for each checkpoint; existing files are refused.

@@ -1,0 +1,16 @@
+{
+  "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/checkpoint_399.pt",
+  "train": "train",
+  "val": "val",
+  "cache": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/linear_features_lite_399",
+  "output": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/linear_lite_399.json",
+  "lite": true,
+  "epochs": 50,
+  "batch_size": 128,
+  "probe_batch_size": 16384,
+  "device": "cuda",
+  "precision": "bf16",
+  "num_workers": 4,
+  "seed": 0,
+  "comet": false
+}
