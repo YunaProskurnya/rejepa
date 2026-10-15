@@ -222,25 +222,7 @@ def _show_denormalized(tensor):
 
 def _normalize_view(tensor):
     shown = (tensor * 0.25 + 0.5).clamp(0, 1)
-    image = T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
-    draw = ImageDraw.Draw(image)
-    font = _font(18)
-    lines = (
-        "(x - mean) / std",
-        f"mean  {MEAN[0]:.3f}  {MEAN[1]:.3f}  {MEAN[2]:.3f}",
-        f"std   {STD[0]:.3f}  {STD[1]:.3f}  {STD[2]:.3f}",
-        "shown as x / 4 + 0.5",
-    )
-    line_h = 22
-    pad = 10
-    width = max(draw.textlength(line, font=font) for line in lines)
-    box = (12, 12, int(12 + pad * 2 + width), 12 + pad * 2 + line_h * len(lines))
-    draw.rectangle(box, fill=PAPER)
-    y = 12 + pad
-    for line in lines:
-        draw.text((12 + pad, y), line, fill=INK, font=font)
-        y += line_h
-    return image
+    return T.ToPILImage()(shown).resize((PANEL, PANEL), Image.Resampling.NEAREST)
 
 
 def _number_view(image, patch_size, grid):
@@ -431,7 +413,7 @@ def main():
     )
 
     display_patch = PANEL // grid
-    model = _show_denormalized(normalized)
+    model = _normalize_view(normalized)
     kept = int(context_indices.numel())
     title_font = _font(20)
     panels = [
@@ -439,8 +421,8 @@ def main():
         _panel("2  Random resized crop", crop_view, title_font),
         _panel("3  Resized to 224", _show_pil(stages["RandomResizedCrop"]), title_font),
         _panel("4  Normalize", _normalize_view(normalized), title_font),
-        _panel("5  Patch numbers", _number_view(model, display_patch, grid), title_font),
-        _panel("6  Patch grid, denormalized", _grid_view(model, display_patch), title_font),
+        _panel("5  Patch numbers", _number_view(_show_denormalized(normalized), display_patch, grid), title_font),
+        _panel("6  Patch grid, normalized", _grid_view(model, display_patch), title_font),
         _panel(
             f"7  Masks on grid  kept {kept}",
             _mask_view(model, blocks, crop, display_patch, excluded_blocks),
@@ -491,8 +473,7 @@ def main():
     wrapped = []
     for line in notes:
         wrapped.extend(_wrap(measure, line, note_font, row_width - margin * 2))
-        wrapped.append("")
-    note_height = 8 + 22 * len(wrapped)
+    note_height = 4 + 18 * len(wrapped)
     height_px = margin + sum(row[0].height for row in rows) + gap * len(rows) + note_height + margin
     canvas = Image.new("RGB", (row_width, height_px), PAPER)
     draw = ImageDraw.Draw(canvas)
@@ -505,10 +486,9 @@ def main():
             x += panel.width + gap
         y += row[0].height + gap
 
-    y += 4
     for line in wrapped:
         draw.text((margin, y), line, fill=NOTE, font=note_font)
-        y += 22
+        y += 18
 
     canvas.save(OUTPUT_PATH)
     print(f"wrote {OUTPUT_PATH}")
