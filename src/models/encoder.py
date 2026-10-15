@@ -61,6 +61,16 @@ class VisionTransformer(nn.Module):
 
     def forward(self, images, indices=None):
         """[B,C,S,S] -> [B,N,D] или [B,K,D] при indices [B,K]."""
+        return self.get_intermediate_layers(images, n=1, indices=indices)[0]
+
+    def get_intermediate_layers(self, images, n=4, indices=None):
+        """Return the last n block outputs, each passed through the final encoder LayerNorm.
+
+        Used by linear evaluation; normal forward still returns only the final block.
+        The shared final norm for intermediate blocks is an explicit evaluation choice.
+        """
+        if not 1 <= n <= len(self.blocks):
+            raise ValueError("n must be between 1 and encoder depth")
         if images.ndim != 4 or tuple(images.shape[1:]) != (
             self.in_channels, self.image_size, self.image_size
         ):
@@ -71,6 +81,9 @@ class VisionTransformer(nn.Module):
             if indices.ndim != 2 or indices.shape[0] != images.shape[0]:
                 raise ValueError("indices must have shape [B,K] with the same batch size as images")
             x = select_tokens(x, indices)
-        for block in self.blocks:
+        outputs = []
+        for index, block in enumerate(self.blocks):
             x = block(x)
-        return self.norm(x)
+            if index >= len(self.blocks) - n:
+                outputs.append(self.norm(x))
+        return outputs

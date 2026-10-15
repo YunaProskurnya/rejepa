@@ -1,0 +1,17 @@
+{
+  "checkpoint": "runs/imagenet100-vit-base-400ep-sigreg-v2/checkpoint.pt",
+  "train": "data/imagenet100/train",
+  "val": "data/imagenet100/val",
+  "cache": "runs/imagenet100-vit-base-400ep-sigreg-v2/linear_features",
+  "output": "runs/imagenet100-vit-base-400ep-sigreg-v2/linear_cached.json",
+  "epochs": 50,
+  "batch_size": 128,
+  "probe_batch_size": 16384,
+  "device": "cuda",
+  "precision": "bf16",
+  "num_workers": 4,
+  "seed": 0,
+  "comet": false,
+  "comet_workspace": "superustam",
+  "comet_project": "rejepa"
+}

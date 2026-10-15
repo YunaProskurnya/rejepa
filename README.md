@@ -316,6 +316,29 @@ JSON содержит top-1/top-5 accuracy, прирост top-1 в процен
 сохраняйте одинаковые данные и параметры оценки. kNN не заменяет linear probe
 из статьи.
 
+## Итоговый linear probe: EMA, SIGReg и VISReg
+
+В [configs/linear_probe_cached.json](configs/linear_probe_cached.json) измените
+`checkpoint`, `train`, `val`, `cache` и `output` на пути вашего запуска.
+На сервере с датасетом в корне проекта укажите `"train": "train"`, `"val": "val"`.
+Для каждого checkpoint нужна отдельная папка кэша.
+
+```sh
+# Один раз: признаки 50 случайных crop/flip каждого train-изображения
+# и фиксированные признаки train/val для подсчёта итоговых метрик.
+python scripts/prepare_linear_cache.py --config configs/linear_probe_cached.json
+
+# Только линейные головы, без повторных проходов encoder.
+python scripts/evaluate_linear_cached.py --config configs/linear_probe_cached.json
+```
+
+| Файл | Содержимое |
+| --- | --- |
+| `linear_cached.best.md` | Читаемый лучший результат с параметрами и train/val accuracy и loss |
+| `linear_cached.best.json` | Лучший результат для программного чтения |
+| `linear_cached.trials.csv` | Все варианты таблицей |
+| `linear_cached.json` | Полный протокол и метрики |
+
 ## Где читать и менять код
 
 `src/` содержит метод, `scripts/` — рабочие запуски обучения и оценки,
@@ -327,6 +350,8 @@ JSON содержит top-1/top-5 accuracy, прирост top-1 в процен
 - `src/optimizer.py` и `src/losses.py` — группы параметров AdamW и функция потерь.
 - `scripts/train.py` — параметры, DataLoader, цикл, расписания и сохранение.
 - `scripts/evaluate_knn.py` — оценка сохранённой модели.
+- `scripts/prepare_linear_cache.py`, `scripts/evaluate_linear_cached.py` — подготовка признаков и итоговый linear probe.
+- `src/linear_probe_final.py` — общий протокол LARS; `src/linear_probe_cache.py` — дисковый кэш.
 - `scripts/setup_imagenet100.sh` — команды команды для скачивания и раскладки ImageNet100.
 - `src/config.py` — чтение JSON и проверка настроек запуска.
 - `src/reference/` — авторские collator и расписания LR/weight decay.
