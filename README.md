@@ -391,3 +391,7 @@ python scripts/evaluate_linear_cached.py --config configs/linear_probe_cached_39
 
 Run these from the repository root, inside tmux with logs on the GPU server.
 Use a new cache and output path for each checkpoint; existing files are refused.
+
+For the full 600-epoch run, use `configs/linear_probe_cached_600.json` in both
+commands. It selects `checkpoint_599.pt` (epoch 600) and stores its cache and
+results separately under `runs/imagenet100-vit-base-600ep/linear_lite_600/`.
