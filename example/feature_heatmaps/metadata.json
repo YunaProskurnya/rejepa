@@ -1,0 +1,134 @@
+{
+  "device": "cpu",
+  "torch_version": "2.12.0+cu130",
+  "preprocessing": "evaluation resize (256/224), center crop, ImageNet normalization",
+  "method": "Centered PCA per image/model; component sign fixed by largest loading; per-channel min-max RGB",
+  "maps": [
+    {
+      "image": "/home/container/rejepa/example/lenna.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/checkpoint.pt",
+      "model": "encoder",
+      "epoch": 400,
+      "step": 406000,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.8913991380136203,
+      "output": "lenna_400ep-visreg_checkpoint_encoder.png"
+    },
+    {
+      "image": "/home/container/rejepa/example/yann.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-400ep-visreg/checkpoint.pt",
+      "model": "encoder",
+      "epoch": 400,
+      "step": 406000,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.9668514752855768,
+      "output": "yann_400ep-visreg_checkpoint_encoder.png"
+    },
+    {
+      "image": "/home/container/rejepa/example/lenna.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-600ep/checkpoint_349.pt",
+      "model": "encoder",
+      "epoch": 350,
+      "step": 355250,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.40525326588049065,
+      "output": "lenna_600ep_checkpoint_349_encoder.png"
+    },
+    {
+      "image": "/home/container/rejepa/example/yann.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-600ep/checkpoint_349.pt",
+      "model": "encoder",
+      "epoch": 350,
+      "step": 355250,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.41360924704346386,
+      "output": "yann_600ep_checkpoint_349_encoder.png"
+    },
+    {
+      "image": "/home/container/rejepa/example/lenna.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-600ep/checkpoint_349.pt",
+      "model": "target_encoder",
+      "epoch": 350,
+      "step": 355250,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.40438206289282197,
+      "output": "lenna_600ep_checkpoint_349_target_encoder.png"
+    },
+    {
+      "image": "/home/container/rejepa/example/yann.png",
+      "checkpoint": "/home/container/shared/rejepa/runs/imagenet100-vit-base-600ep/checkpoint_349.pt",
+      "model": "target_encoder",
+      "epoch": 350,
+      "step": 355250,
+      "encoder": {
+        "image_size": 224,
+        "patch_size": 16,
+        "in_channels": 3,
+        "embed_dim": 768,
+        "depth": 12,
+        "num_heads": 12,
+        "mlp_ratio": 4.0,
+        "qkv_bias": true,
+        "drop": 0.0,
+        "attn_drop": 0.0
+      },
+      "pca_explained_variance": 0.42020538594021317,
+      "output": "yann_600ep_checkpoint_349_target_encoder.png"
+    }
+  ]
+}
